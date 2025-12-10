@@ -1,10 +1,4 @@
-const {
-    Client,
-    GatewayIntentBits,
-    Partials,
-    Events,
-    PermissionsBitField
-} = require("discord.js");
+const { Client, GatewayIntentBits, Partials, Events, PermissionsBitField } = require("discord.js");
 
 const client = new Client({
     intents: [
@@ -17,31 +11,29 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
-// Store Temporary Voice Channels
+// Store Temporary VC Data
 const tempVCs = new Map();
 
-// The channel they click to generate a temp VC
-const CREATION_CHANNEL_ID = "1447154911627186206"; // ← your channel
+// ID of the channel users must click to create a temp VC
+const CREATION_CHANNEL_ID = "1447154911627186206"; // your source VC
 
 client.once(Events.ClientReady, () => {
-    console.log(`${client.user.tag} is now online 💜`);
+    console.log(`${client.user.tag} is online!`);
 });
 
-// When a user joins the creation channel → create VC
+// When user joins creation VC → create temp VC
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     if (newState.channelId === CREATION_CHANNEL_ID) {
-
         const guild = newState.guild;
-        const member = newState.member;
+        const user = newState.member;
 
-        // Create a new temp voice channel
-        const tempChannel = await guild.channels.create({
-            name: `💜 Wockhardt Voice Master — ${member.user.username} VC`,
-            type: 2, // Voice
+        const newVC = await guild.channels.create({
+            name: `💜・${user.user.username}`,
+            type: 2,
             parent: newState.channel.parentId,
             permissionOverwrites: [
                 {
-                    id: member.id,
+                    id: user.id,
                     allow: [
                         PermissionsBitField.Flags.Connect,
                         PermissionsBitField.Flags.ManageChannels
@@ -57,20 +49,20 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
             ]
         });
 
-        // Move user into their new VC
-        await newState.setChannel(tempChannel);
+        // Move user into the new channel
+        await newState.setChannel(newVC);
 
-        // Save temp VC info
-        tempVCs.set(tempChannel.id, {
-            owner: member.id,
-            id: tempChannel.id
+        // Save ownership
+        tempVCs.set(newVC.id, {
+            owner: user.id,
+            id: newVC.id
         });
     }
 
-    // Delete empty temp VCs
+    // Auto-delete VC when empty
     if (oldState.channelId && tempVCs.has(oldState.channelId)) {
-        const tempData = tempVCs.get(oldState.channelId);
-        const channel = oldState.guild.channels.cache.get(tempData.id);
+        const data = tempVCs.get(oldState.channelId);
+        const channel = oldState.guild.channels.cache.get(data.id);
 
         if (channel && channel.members.size === 0) {
             await channel.delete().catch(() => {});
@@ -79,46 +71,5 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     }
 });
 
-// Slash command handler
-client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const cmd = interaction.commandName;
-    const vc = interaction.member.voice.channel;
-
-    if (!vc) {
-        return interaction.reply({
-            content: "❌ You must be inside your temp VC.",
-            ephemeral: true
-        });
-    }
-
-    const temp = tempVCs.get(vc.id);
-    if (!temp || temp.owner !== interaction.user.id) {
-        return interaction.reply({
-            content: "❌ Only the **owner** of this VC can use these commands.",
-            ephemeral: true
-        });
-    }
-
-    // Lock command
-    if (cmd === "lock") {
-        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, {
-            Connect: false
-        });
-
-        return interaction.reply("🔒 Your VC is **locked**.");
-    }
-
-    // Unlock command
-    if (cmd === "unlock") {
-        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, {
-            Connect: true
-        });
-
-        return interaction.reply("🔓 Your VC is **unlocked**.");
-    }
-});
-
-// LOGIN USING ENV VARIABLE
+// Login with environment variable TOKEN
 client.login(process.env.TOKEN);
