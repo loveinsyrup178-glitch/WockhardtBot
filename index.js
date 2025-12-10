@@ -1,4 +1,11 @@
-const { Client, GatewayIntentBits, Partials, Events, PermissionsBitField } = require("discord.js");
+const {
+    Client,
+    GatewayIntentBits,
+    Partials,
+    Events,
+    PermissionsBitField
+} = require("discord.js");
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -10,96 +17,108 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
-// Store Temporary VC Data
+// Store Temporary Voice Channels
 const tempVCs = new Map();
 
-// ID of the channel users must click to create a temp VC
-const CREATION_CHANNEL_ID = "1447154911627186206"; // <-- Change this
+// The channel they click to generate a temp VC
+const CREATION_CHANNEL_ID = "1447154911627186206"; // ← your channel
 
 client.once(Events.ClientReady, () => {
-    console.log(`${client.user.tag} is online and ready!`);
+    console.log(`${client.user.tag} is now online 💜`);
 });
 
-// When a user joins the creation voice channel → create temp VC
+// When a user joins the creation channel → create VC
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     if (newState.channelId === CREATION_CHANNEL_ID) {
-        const guild = newState.guild;
-        const user = newState.member;
 
-        // Create new voice channel
-        const newTempVC = await guild.channels.create({
-            name: `${user.user.username}'s VC`,
+        const guild = newState.guild;
+        const member = newState.member;
+
+        // Create a new temp voice channel
+        const tempChannel = await guild.channels.create({
+            name: `💜 Wockhardt Voice Master — ${member.user.username} VC`,
             type: 2, // Voice
             parent: newState.channel.parentId,
             permissionOverwrites: [
                 {
-                    id: user.id,
-                    allow: [PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.ManageChannels]
+                    id: member.id,
+                    allow: [
+                        PermissionsBitField.Flags.Connect,
+                        PermissionsBitField.Flags.ManageChannels
+                    ]
                 },
                 {
                     id: guild.roles.everyone.id,
-                    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect]
+                    allow: [
+                        PermissionsBitField.Flags.ViewChannel,
+                        PermissionsBitField.Flags.Connect
+                    ]
                 }
             ]
         });
 
-        // Move user into their VC
-        await newState.setChannel(newTempVC);
+        // Move user into their new VC
+        await newState.setChannel(tempChannel);
 
-        // Save owner + channel
-        tempVCs.set(newTempVC.id, {
-            owner: user.id,
-            id: newTempVC.id
+        // Save temp VC info
+        tempVCs.set(tempChannel.id, {
+            owner: member.id,
+            id: tempChannel.id
         });
     }
 
-    // Auto-delete empty temp VCs
+    // Delete empty temp VCs
     if (oldState.channelId && tempVCs.has(oldState.channelId)) {
         const tempData = tempVCs.get(oldState.channelId);
-        const oldChannel = oldState.guild.channels.cache.get(tempData.id);
+        const channel = oldState.guild.channels.cache.get(tempData.id);
 
-        if (oldChannel && oldChannel.members.size === 0) {
-            await oldChannel.delete().catch(() => {});
+        if (channel && channel.members.size === 0) {
+            await channel.delete().catch(() => {});
             tempVCs.delete(oldState.channelId);
         }
     }
 });
 
-// Slash command interactions
+// Slash command handler
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     const cmd = interaction.commandName;
+    const vc = interaction.member.voice.channel;
 
-    // Lock VC
-    if (cmd === "lock") {
-        const vc = interaction.member.voice.channel;
-        if (!vc) return interaction.reply({ content: "❌ You must be in your temp VC.", ephemeral: true });
-
-        const tempData = tempVCs.get(vc.id);
-        if (!tempData || tempData.owner !== interaction.user.id)
-            return interaction.reply({ content: "❌ Only the VC owner can lock it.", ephemeral: true });
-
-        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { Connect: false });
-
-        return interaction.reply({ content: "🔒 Your VC is now **locked**." });
+    if (!vc) {
+        return interaction.reply({
+            content: "❌ You must be inside your temp VC.",
+            ephemeral: true
+        });
     }
 
-    // Unlock VC
+    const temp = tempVCs.get(vc.id);
+    if (!temp || temp.owner !== interaction.user.id) {
+        return interaction.reply({
+            content: "❌ Only the **owner** of this VC can use these commands.",
+            ephemeral: true
+        });
+    }
+
+    // Lock command
+    if (cmd === "lock") {
+        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, {
+            Connect: false
+        });
+
+        return interaction.reply("🔒 Your VC is **locked**.");
+    }
+
+    // Unlock command
     if (cmd === "unlock") {
-        const vc = interaction.member.voice.channel;
-        if (!vc) return interaction.reply({ content: "❌ You must be in your temp VC.", ephemeral: true });
+        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, {
+            Connect: true
+        });
 
-        const tempData = tempVCs.get(vc.id);
-        if (!tempData || tempData.owner !== interaction.user.id)
-            return interaction.reply({ content: "❌ Only the VC owner can unlock it.", ephemeral: true });
-
-        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { Connect: true });
-
-        return interaction.reply({ content: "🔓 Your VC is now **unlocked**." });
+        return interaction.reply("🔓 Your VC is **unlocked**.");
     }
 });
 
-// LOGIN USING TOKEN VARIABLE
+// LOGIN USING ENV VARIABLE
 client.login(process.env.TOKEN);
-
