@@ -1,8 +1,11 @@
 {
   "name": "wockhardtbot",
   "version": "1.0.0",
-  "description": "Temp VC bot",
+  "description": "Wockhardt Temp VC Bot",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "discord.js": "^14.14.1"
   }
