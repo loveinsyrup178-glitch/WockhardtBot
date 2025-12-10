@@ -1,111 +1,198 @@
-// ===============================================
-// WOCKHARDT — TEMP VC SYSTEM (DISOCLOUD SAFE)
-// ===============================================
+// =====================================
+// WOCKHARDT — ADVANCED TEMP VC SYSTEM
+// LOCK • UNLOCK • LIMIT • RENAME • CLAIM
+// =====================================
 
 const {
     Client,
     GatewayIntentBits,
     Partials,
     PermissionsBitField,
-    Events
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle
 } = require("discord.js");
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.MessageContent
     ],
     partials: [Partials.Channel]
 });
 
-// -----------------------------------------------
-// SETTINGS
-// -----------------------------------------------
+// -------------------------------------
+// YOUR SERVER SETTINGS
+// -------------------------------------
+const CREATE_VC_ID = "1447154911627186206";     // click-to-create VC
+const CATEGORY_ID  = "1446462738770694296";     // temp VC category
+const CONTROL_PANEL_CHANNEL = "1446420100151382131"; // panel messages go here
 
-// When users click THIS VC → create a private one:
-const CREATION_VC = "1447154911627186206";
+const TEMP_NAME = "💜・{username}";
 
-// Create each temp VC inside THIS CATEGORY:
-const TEMP_CATEGORY = "1446462738770694296";
-
-// What the temp VC is named:
-const VC_NAME = "💜・{username}";
-
-// Store created VC + owner
+// Track temporary VCs
 const tempVCs = new Map();
 
-// -----------------------------------------------
-// BOT READY
-// -----------------------------------------------
-client.once(Events.ClientReady, () => {
-    console.log(`💜 ${client.user.tag} is online!`);
+// -------------------------------------
+// READY
+// -------------------------------------
+client.once("ready", () => {
+    console.log(`💜 ${client.user.tag} is online`);
 });
 
-// -----------------------------------------------
-// CREATE TEMP VC
-// -----------------------------------------------
-client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+// -------------------------------------
+// CREATE CONTROL PANEL MESSAGE
+// -------------------------------------
+function controlPanel(member, channel) {
+    return {
+        content: `💜 **Temp VC created for <@${member.id}>**\n${channel}`,
+        components: [
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId("lock")
+                    .setLabel("🔒 Lock")
+                    .setStyle(ButtonStyle.Danger),
 
-    // User joins the creation VC
-    if (newState.channelId === CREATION_VC && oldState.channelId !== CREATION_VC) {
+                new ButtonBuilder()
+                    .setCustomId("unlock")
+                    .setLabel("🔓 Unlock")
+                    .setStyle(ButtonStyle.Success),
+
+                new ButtonBuilder()
+                    .setCustomId("limit")
+                    .setLabel("👥 Limit")
+                    .setStyle(ButtonStyle.Primary),
+
+                new ButtonBuilder()
+                    .setCustomId("rename")
+                    .setLabel("✏️ Rename")
+                    .setStyle(ButtonStyle.Secondary),
+
+                new ButtonBuilder()
+                    .setCustomId("claim")
+                    .setLabel("👑 Claim")
+                    .setStyle(ButtonStyle.Success)
+            )
+        ]
+    };
+}
+
+// -------------------------------------
+// CREATE TEMP VC WHEN USER JOINS
+// -------------------------------------
+client.on("voiceStateUpdate", async (oldState, newState) => {
+
+    if (newState.channelId === CREATE_VC_ID) {
         const guild = newState.guild;
         const member = newState.member;
 
-        const finalName = VC_NAME.replace("{username}", member.user.username);
+        const name = TEMP_NAME.replace("{username}", member.user.username);
 
-        // Create new temp VC
+        // Create new VC
         const newVC = await guild.channels.create({
-            name: finalName,
-            type: 2, // voice
-            parent: TEMP_CATEGORY,
+            name,
+            type: 2,
+            parent: CATEGORY_ID,
             permissionOverwrites: [
-                {
-                    id: member.id,
-                    allow: [
-                        PermissionsBitField.Flags.Connect,
-                        PermissionsBitField.Flags.ViewChannel,
-                        PermissionsBitField.Flags.ManageChannels
-                    ]
-                },
-                {
-                    id: guild.roles.everyone.id,
-                    allow: [
-                        PermissionsBitField.Flags.ViewChannel,
-                        PermissionsBitField.Flags.Connect
-                    ]
-                }
+                { id: member.id, allow: ["Connect", "ManageChannels"] },
+                { id: guild.roles.everyone.id, allow: ["ViewChannel", "Connect"] }
             ]
         });
 
-        // Move user into their VC
-        await newState.setChannel(newVC).catch(() => {});
+        // Move user into it
+        await member.voice.setChannel(newVC).catch(() => {});
 
-        // Save ownership
+        // Save VC ownership
         tempVCs.set(newVC.id, {
             owner: member.id,
-            id: newVC.id
+            channel: newVC
         });
 
-        console.log(`Created VC for ${member.user.tag}`);
+        // Send control panel
+        const panel = guild.channels.cache.get(CONTROL_PANEL_CHANNEL);
+        if (panel) panel.send(controlPanel(member, newVC));
     }
 
-    // -----------------------------------------------
-    // DELETE TEMP VC WHEN EMPTY
-    // -----------------------------------------------
+    // DELETE VC when empty
     if (oldState.channelId && tempVCs.has(oldState.channelId)) {
         const data = tempVCs.get(oldState.channelId);
-        const vc = oldState.guild.channels.cache.get(data.id);
+        const vc = data.channel;
 
-        if (vc && vc.members.size === 0) {
-            await vc.delete().catch(() => {});
-            tempVCs.delete(oldState.channelId);
-            console.log("Deleted empty VC");
+        if (vc.members.size === 0) {
+            tempVCs.delete(vc.id);
+            vc.delete().catch(() => {});
         }
     }
 });
 
-// -----------------------------------------------
-// LOGIN (Discloud uses ENV variable)
-// -----------------------------------------------
+// -------------------------------------
+// BUTTON INTERACTIONS
+// -------------------------------------
+client.on("interactionCreate", async interaction => {
+    if (!interaction.isButton()) return;
+
+    const member = interaction.guild.members.cache.get(interaction.user.id);
+    const vc = member?.voice?.channel;
+    if (!vc) return interaction.reply({ content: "❌ You must be in a temporary VC.", ephemeral: true });
+
+    const data = tempVCs.get(vc.id);
+    if (!data) return interaction.reply({ content: "❌ This is not a temp VC.", ephemeral: true });
+
+    if (interaction.user.id !== data.owner)
+        return interaction.reply({ content: "❌ Only the VC owner can do that.", ephemeral: true });
+
+    // --- LOCK VC ---
+    if (interaction.customId === "lock") {
+        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { Connect: false });
+        return interaction.reply({ content: "🔒 The VC has been locked.", ephemeral: true });
+    }
+
+    // --- UNLOCK VC ---
+    if (interaction.customId === "unlock") {
+        await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { Connect: true });
+        return interaction.reply({ content: "🔓 The VC has been unlocked.", ephemeral: true });
+    }
+
+    // --- SET LIMIT ---
+    if (interaction.customId === "limit") {
+        await interaction.reply({ content: "Send the new user limit (number).", ephemeral: true });
+
+        const filter = m => m.author.id === interaction.user.id;
+        const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 15000 });
+
+        if (!collected) return;
+        const num = parseInt(collected.first().content);
+        if (isNaN(num)) return collected.first().reply("❌ Invalid number.");
+
+        await vc.setUserLimit(num);
+        return collected.first().reply(`👥 Limit set to **${num}**.`);
+    }
+
+    // --- RENAME ---
+    if (interaction.customId === "rename") {
+        await interaction.reply({ content: "Send the new channel name.", ephemeral: true });
+
+        const filter = m => m.author.id === interaction.user.id;
+        const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 15000 });
+
+        if (!collected) return;
+        const newName = collected.first().content.slice(0, 40);
+
+        await vc.setName(newName);
+        return collected.first().reply(`✏️ Renamed to **${newName}**.`);
+    }
+
+    // --- CLAIM OWNERSHIP ---
+    if (interaction.customId === "claim") {
+        data.owner = interaction.user.id;
+        tempVCs.set(vc.id, data);
+        return interaction.reply({ content: "👑 You now own this VC.", ephemeral: true });
+    }
+});
+
+// -------------------------------------
+// LOGIN (TOKEN FROM DISCOULD VARIABLES)
+// -------------------------------------
 client.login(process.env.TOKEN);
