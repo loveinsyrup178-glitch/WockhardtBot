@@ -1,41 +1,70 @@
-const { Client, GatewayIntentBits, Partials, Events, PermissionsBitField } = require("discord.js");
+// ===============================================
+// WOCKHARDT — TEMP VC SYSTEM (DISOCLOUD SAFE)
+// ===============================================
+
+const {
+    Client,
+    GatewayIntentBits,
+    Partials,
+    PermissionsBitField,
+    Events
+} = require("discord.js");
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.GuildMembers
     ],
     partials: [Partials.Channel]
 });
 
-// Store Temporary VC Data
+// -----------------------------------------------
+// SETTINGS
+// -----------------------------------------------
+
+// When users click THIS VC → create a private one:
+const CREATION_VC = "1447154911627186206";
+
+// Create each temp VC inside THIS CATEGORY:
+const TEMP_CATEGORY = "1446462738770694296";
+
+// What the temp VC is named:
+const VC_NAME = "💜・{username}";
+
+// Store created VC + owner
 const tempVCs = new Map();
 
-// ID of the channel users must click to create a temp VC
-const CREATION_CHANNEL_ID = "1447154911627186206"; // your source VC
-
+// -----------------------------------------------
+// BOT READY
+// -----------------------------------------------
 client.once(Events.ClientReady, () => {
-    console.log(`${client.user.tag} is online!`);
+    console.log(`💜 ${client.user.tag} is online!`);
 });
 
-// When user joins creation VC → create temp VC
+// -----------------------------------------------
+// CREATE TEMP VC
+// -----------------------------------------------
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
-    if (newState.channelId === CREATION_CHANNEL_ID) {
-        const guild = newState.guild;
-        const user = newState.member;
 
+    // User joins the creation VC
+    if (newState.channelId === CREATION_VC && oldState.channelId !== CREATION_VC) {
+        const guild = newState.guild;
+        const member = newState.member;
+
+        const finalName = VC_NAME.replace("{username}", member.user.username);
+
+        // Create new temp VC
         const newVC = await guild.channels.create({
-            name: `💜・${user.user.username}`,
-            type: 2,
-            parent: newState.channel.parentId,
+            name: finalName,
+            type: 2, // voice
+            parent: TEMP_CATEGORY,
             permissionOverwrites: [
                 {
-                    id: user.id,
+                    id: member.id,
                     allow: [
                         PermissionsBitField.Flags.Connect,
+                        PermissionsBitField.Flags.ViewChannel,
                         PermissionsBitField.Flags.ManageChannels
                     ]
                 },
@@ -49,27 +78,34 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
             ]
         });
 
-        // Move user into the new channel
-        await newState.setChannel(newVC);
+        // Move user into their VC
+        await newState.setChannel(newVC).catch(() => {});
 
         // Save ownership
         tempVCs.set(newVC.id, {
-            owner: user.id,
+            owner: member.id,
             id: newVC.id
         });
+
+        console.log(`Created VC for ${member.user.tag}`);
     }
 
-    // Auto-delete VC when empty
+    // -----------------------------------------------
+    // DELETE TEMP VC WHEN EMPTY
+    // -----------------------------------------------
     if (oldState.channelId && tempVCs.has(oldState.channelId)) {
         const data = tempVCs.get(oldState.channelId);
-        const channel = oldState.guild.channels.cache.get(data.id);
+        const vc = oldState.guild.channels.cache.get(data.id);
 
-        if (channel && channel.members.size === 0) {
-            await channel.delete().catch(() => {});
+        if (vc && vc.members.size === 0) {
+            await vc.delete().catch(() => {});
             tempVCs.delete(oldState.channelId);
+            console.log("Deleted empty VC");
         }
     }
 });
 
-// Login with environment variable TOKEN
+// -----------------------------------------------
+// LOGIN (Discloud uses ENV variable)
+// -----------------------------------------------
 client.login(process.env.TOKEN);
