@@ -1,0 +1,12 @@
+{
+  "name": "wockhardt-bot",
+  "version": "1.0.0",
+  "description": "Wockhardt Temp VC Bot",
+  "main": "index.js",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "14.16.1",
+    "fs": "0.0.1-security"
+  }
+}
