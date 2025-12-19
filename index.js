@@ -24,11 +24,11 @@ const client = new Client({
 });
 
 // -------------------------------------
-// YOUR SERVER SETTINGS
+// YOUR SERVER SETTINGS (UPDATED)
 // -------------------------------------
-const CREATE_VC_ID = "1447154911627186206";     // click-to-create VC
-const CATEGORY_ID  = "1446462738770694296";     // temp VC category
-const CONTROL_PANEL_CHANNEL = "1446420100151382131"; // panel messages go here
+const CREATE_VC_ID = "1451498864350859264";        // click-to-create VC
+const CATEGORY_ID  = "1411585822708469861";        // temp VC category
+const CONTROL_PANEL_CHANNEL = "1451604392007569480"; // control panel channel
 
 const TEMP_NAME = "💜・{username}";
 
@@ -162,7 +162,7 @@ client.on("interactionCreate", async interaction => {
         const filter = m => m.author.id === interaction.user.id;
         const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 15000 });
 
-        if (!collected) return;
+        if (!collected.size) return;
         const num = parseInt(collected.first().content);
         if (isNaN(num)) return collected.first().reply("❌ Invalid number.");
 
@@ -177,7 +177,7 @@ client.on("interactionCreate", async interaction => {
         const filter = m => m.author.id === interaction.user.id;
         const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 15000 });
 
-        if (!collected) return;
+        if (!collected.size) return;
         const newName = collected.first().content.slice(0, 40);
 
         await vc.setName(newName);
@@ -193,6 +193,6 @@ client.on("interactionCreate", async interaction => {
 });
 
 // -------------------------------------
-// LOGIN (TOKEN FROM DISCOULD VARIABLES)
+// LOGIN (TOKEN FROM ENV VARIABLES)
 // -------------------------------------
 client.login(process.env.TOKEN);
