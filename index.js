@@ -1,12 +1,13 @@
 // =====================================
-// WOCKHARDT — TEMP VC SYSTEM (WORKING)
-// Join-to-Create • Auto Panel Text • Buttons
-// Owner + Staff can Pull Panel
-// Prefix: -
-// discord.js v14
+// WOCKHARDT — ADVANCED TEMP VC SYSTEM v2 (WORKING)
+// JOIN-TO-CREATE + PRIVATE PANEL TEXT
+// Buttons: LOCK • UNLOCK • LIMIT • RENAME • CLAIM
+// Extra: PULL PANEL (command + button)
+// Staff can also use controls
 // =====================================
 
 require("dotenv").config();
+
 const {
   Client,
   GatewayIntentBits,
@@ -18,23 +19,29 @@ const {
   PermissionFlagsBits,
 } = require("discord.js");
 
-// -------------------- CONFIG --------------------
+// ----------------------
+// CONFIG
+// ----------------------
 const PREFIX = "-";
 
-// REQUIRED (set in .env ideally)
-const CREATE_VC_ID = process.env.CREATE_VC_ID || "1451498864350859264"; // join-to-create VOICE channel
-const CATEGORY_ID = process.env.CATEGORY_ID || "1411585822708469861";   // category where temp vc + temp text go
+// join-to-create VOICE channel
+const CREATE_VC_ID = process.env.CREATE_VC_ID || "1451498864350859264";
 
-// Name template
+// temp category (MUST be a category id)
+const CATEGORY_ID = process.env.CATEGORY_ID || "1411585822708469861";
+
+// temp VC naming
 const TEMP_NAME = process.env.TEMP_NAME || "💜・{username}";
 
-// Optional staff roles (comma separated role IDs). Staff also can use panel.
-const MOD_ROLE_IDS = (process.env.MOD_ROLE_IDS || "")
+// optional: staff roles (comma separated role ids)
+const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// -------------------- CLIENT --------------------
+// ----------------------
+// CLIENT
+// ----------------------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -46,83 +53,87 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-// Track temp VCs: vcId -> { ownerId, vcId, textId }
+// key = vcId -> { ownerId, vcId, textId, panelMsgId }
 const tempVCs = new Map();
 
-// -------------------- STAFF CHECK --------------------
 function isStaff(member) {
   if (!member) return false;
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
-  if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
   if (member.permissions.has(PermissionFlagsBits.ManageChannels)) return true;
+  if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
   if (member.permissions.has(PermissionFlagsBits.ManageMessages)) return true;
-  if (MOD_ROLE_IDS.length && MOD_ROLE_IDS.some((id) => member.roles.cache.has(id))) return true;
+  if (STAFF_ROLE_IDS.length && STAFF_ROLE_IDS.some((id) => member.roles.cache.has(id))) return true;
   return false;
 }
 
-// -------------------- PANEL MESSAGE --------------------
+function safeName(str, max = 90) {
+  return (str || "temp").replace(/[\n\r\t]/g, " ").slice(0, max);
+}
+
+// ----------------------
+// PANEL (buttons)
+// ----------------------
+function panelRows() {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("lock").setLabel("🔒 Lock").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId("unlock").setLabel("🔓 Unlock").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("limit").setLabel("👥 Limit").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("rename").setLabel("✏️ Rename").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("claim").setLabel("👑 Claim").setStyle(ButtonStyle.Success)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("pull_panel").setLabel("📌 Pull Panel").setStyle(ButtonStyle.Secondary)
+  );
+
+  return [row1, row2];
+}
+
 function controlPanelPayload(ownerId, vcId) {
   return {
     content:
-      `💜 **Temp VC Panel**\n` +
-      `Owner: <@${ownerId}>\n` +
-      `VC: <#${vcId}>\n\n` +
-      `Use buttons below. Owner + Staff can use.`,
-    components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("lock").setLabel("🔒 Lock").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId("unlock").setLabel("🔓 Unlock").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId("limit").setLabel("👥 Limit").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("rename").setLabel("✏️ Rename").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("claim").setLabel("👑 Claim").setStyle(ButtonStyle.Success),
-      ),
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("pullpanel").setLabel("📌 Pull Panel").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("closevc").setLabel("🧨 Close VC").setStyle(ButtonStyle.Danger),
-      ),
-    ],
+      `💜 **Temp VC created for <@${ownerId}>**\n` +
+      `🔊 <#${vcId}>\n\n` +
+      `**Controls:** Lock / Unlock / Limit / Rename / Claim\n` +
+      `📌 Use **${PREFIX}panel** anytime to pull this again.`,
+    allowedMentions: { users: [ownerId] },
+    components: panelRows(),
   };
 }
 
-// -------------------- HELPERS --------------------
-async function fetchMeSafe(guild) {
-  return guild.members.me ?? (await guild.members.fetchMe());
-}
-
-function getMemberTempVC(member) {
-  const vc = member?.voice?.channel;
-  if (!vc) return null;
-  if (!tempVCs.has(vc.id)) return null;
-  return vc;
-}
-
-async function sendPanelToText(guild, vcId) {
-  const data = tempVCs.get(vcId);
-  if (!data) return null;
-
-  const txt = guild.channels.cache.get(data.textId);
-  if (!txt || !txt.isTextBased()) return null;
-
-  return txt.send(controlPanelPayload(data.ownerId, data.vcId));
-}
-
-// -------------------- READY --------------------
-client.once("ready", () => {
+// ----------------------
+// READY
+// ----------------------
+client.once("ready", async () => {
   console.log(`💜 ${client.user.tag} is online`);
+  console.log(`CREATE_VC_ID=${CREATE_VC_ID}`);
+  console.log(`CATEGORY_ID=${CATEGORY_ID}`);
 });
 
-// -------------------- CREATE / DELETE TEMP VCS --------------------
+// ----------------------
+// CREATE TEMP VC + PANEL TEXT
+// ----------------------
 client.on("voiceStateUpdate", async (oldState, newState) => {
-  // CREATE when user joins join-to-create VC
+  // Create when user joins join-to-create channel
   if (newState.channelId === CREATE_VC_ID) {
     const guild = newState.guild;
     const member = newState.member;
+    if (!guild || !member) return;
 
     try {
-      const me = await fetchMeSafe(guild);
-      const baseName = TEMP_NAME.replace("{username}", member.user.username).slice(0, 90);
+      // Hard check: category exists + is category
+      const cat = guild.channels.cache.get(CATEGORY_ID);
+      if (!cat || cat.type !== ChannelType.GuildCategory) {
+        console.log("❌ CATEGORY_ID invalid or not a category:", CATEGORY_ID);
+        return;
+      }
 
-      // Create temp voice channel
+      // Ensure we have bot member (fixes many “doesn’t create” cases)
+      const me = await guild.members.fetchMe();
+
+      const baseName = safeName(TEMP_NAME.replace("{username}", member.user.username), 90);
+
+      // Create temp voice
       const newVC = await guild.channels.create({
         name: baseName,
         type: ChannelType.GuildVoice,
@@ -143,18 +154,25 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
           },
           {
             id: me.id,
-            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.MoveMembers],
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.ManageChannels,
+              PermissionFlagsBits.MoveMembers,
+              PermissionFlagsBits.Connect,
+            ],
           },
         ],
       });
 
-      // Create temp text panel channel
+      // Create temp text panel
       const newText = await guild.channels.create({
-        name: `${baseName}-panel`.slice(0, 90),
+        name: safeName(`${baseName}-panel`, 90),
         type: ChannelType.GuildText,
         parent: CATEGORY_ID,
         permissionOverwrites: [
           { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+
+          // Owner
           {
             id: member.id,
             allow: [
@@ -165,6 +183,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
               PermissionFlagsBits.AttachFiles,
             ],
           },
+
+          // Bot
           {
             id: me.id,
             allow: [
@@ -175,23 +195,37 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
               PermissionFlagsBits.ManageMessages,
             ],
           },
+
+          // Optional staff roles
+          ...STAFF_ROLE_IDS.map((rid) => ({
+            id: rid,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.ManageChannels,
+            ],
+          })),
         ],
       });
 
-      // Save
-      tempVCs.set(newVC.id, { ownerId: member.id, vcId: newVC.id, textId: newText.id });
-
-      // Move member into their temp VC
+      // Move user into temp VC
       await member.voice.setChannel(newVC).catch(() => {});
 
+      // Save record
+      tempVCs.set(newVC.id, { ownerId: member.id, vcId: newVC.id, textId: newText.id, panelMsgId: null });
+
       // Send panel
-      await newText.send(controlPanelPayload(member.id, newVC.id));
+      const panelMsg = await newText.send(controlPanelPayload(member.id, newVC.id));
+      tempVCs.set(newVC.id, { ownerId: member.id, vcId: newVC.id, textId: newText.id, panelMsgId: panelMsg.id });
+
+      console.log(`✅ Created temp VC ${newVC.id} + panel ${newText.id} for ${member.user.tag}`);
     } catch (e) {
-      console.log("❌ Temp VC create failed:", e); // shows real reason
+      console.log("❌ Temp VC create failed FULL ERROR:", e);
     }
   }
 
-  // DELETE when a temp VC becomes empty
+  // Delete when empty
   if (oldState.channelId && tempVCs.has(oldState.channelId)) {
     const data = tempVCs.get(oldState.channelId);
     const guild = oldState.guild;
@@ -201,124 +235,157 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
     if (vc && vc.members.size === 0) {
       tempVCs.delete(vc.id);
+
       vc.delete().catch(() => {});
       if (txt) txt.delete().catch(() => {});
+      console.log(`🧹 Deleted temp VC ${data.vcId} + panel ${data.textId}`);
     }
   }
 });
 
-// -------------------- COMMAND: -panel (Pull Panel) --------------------
+// ----------------------
+// COMMAND: -panel (pull panel)
+// ----------------------
 client.on("messageCreate", async (msg) => {
-  if (msg.author.bot) return;
-  if (!msg.guild) return;
+  if (!msg.guild || msg.author.bot) return;
   if (!msg.content.startsWith(PREFIX)) return;
 
-  const cmd = msg.content.slice(PREFIX.length).trim().toLowerCase();
+  const [cmdRaw] = msg.content.slice(PREFIX.length).trim().split(/\s+/);
+  const cmd = (cmdRaw || "").toLowerCase();
+
   if (cmd !== "panel") return;
 
   const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
   if (!member) return;
 
-  const vc = getMemberTempVC(member);
-  if (!vc) return msg.reply("❌ You must be in your temp VC to pull the panel.");
+  // Must be in a temp VC OR be staff
+  const vc = member.voice?.channel || null;
+
+  if (!vc) {
+    if (!isStaff(member)) {
+      return msg.reply("❌ Join your temp VC first to pull the panel.").catch(() => {});
+    }
+    // staff not in VC: attempt to pull panel in THIS channel if it’s one of the temp panel channels
+    const found = [...tempVCs.values()].find((d) => d.textId === msg.channel.id);
+    if (!found) return msg.reply("❌ Run this inside a temp panel channel or while in a temp VC.").catch(() => {});
+    const panel = await msg.channel.send(controlPanelPayload(found.ownerId, found.vcId)).catch(() => null);
+    if (panel) tempVCs.set(found.vcId, { ...found, panelMsgId: panel.id });
+    return;
+  }
 
   const data = tempVCs.get(vc.id);
-  const ownerOrStaff = member.id === data.ownerId || isStaff(member);
-  if (!ownerOrStaff) return msg.reply("❌ Only the VC owner or staff can pull the panel.");
+  if (!data) return msg.reply("❌ This VC is not a temp VC.").catch(() => {});
 
-  const sent = await sendPanelToText(msg.guild, vc.id);
-  if (!sent) return msg.reply("⚠️ Panel channel not found.");
+  // Owner or staff can pull
+  if (msg.author.id !== data.ownerId && !isStaff(member)) {
+    return msg.reply("❌ Only the VC owner or staff can pull the panel.").catch(() => {});
+  }
 
-  return msg.reply("✅ Panel pulled.").catch(() => {});
+  const panelChannel = msg.guild.channels.cache.get(data.textId);
+  if (!panelChannel || !panelChannel.isTextBased()) {
+    return msg.reply("❌ Panel channel missing.").catch(() => {});
+  }
+
+  const panelMsg = await panelChannel.send(controlPanelPayload(data.ownerId, data.vcId)).catch(() => null);
+  if (panelMsg) tempVCs.set(vc.id, { ...data, panelMsgId: panelMsg.id });
+
+  msg.reply("📌 Panel pulled.").catch(() => {});
 });
 
-// -------------------- BUTTONS --------------------
+// ----------------------
+// BUTTON CONTROLS (OWNER OR STAFF)
+// ----------------------
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isButton()) return;
   if (!interaction.guild) return;
 
-  const member = interaction.guild.members.cache.get(interaction.user.id);
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
   if (!member) return;
 
-  const vc = getMemberTempVC(member);
-  if (!vc) return interaction.reply({ content: "❌ You must be in your temp VC.", ephemeral: true });
+  // If pressed inside a panel channel, find VC by that panel channel id
+  let data =
+    [...tempVCs.values()].find((d) => d.textId === interaction.channelId) ||
+    null;
 
-  const data = tempVCs.get(vc.id);
-  if (!data) return interaction.reply({ content: "❌ This is not a temp VC.", ephemeral: true });
+  // Otherwise use the VC the user is in
+  if (!data) {
+    const vc = member.voice?.channel;
+    if (vc) data = tempVCs.get(vc.id) || null;
+  }
 
-  const ownerOrStaff = interaction.user.id === data.ownerId || isStaff(member);
-  if (!ownerOrStaff) {
+  if (!data) {
+    return interaction.reply({ content: "❌ This is not linked to a temp VC.", ephemeral: true });
+  }
+
+  const vc = interaction.guild.channels.cache.get(data.vcId);
+  if (!vc) return interaction.reply({ content: "❌ Temp VC not found.", ephemeral: true });
+
+  const isOwner = interaction.user.id === data.ownerId;
+  const staff = isStaff(member);
+
+  if (!isOwner && !staff) {
     return interaction.reply({ content: "❌ Only the VC owner or staff can use these controls.", ephemeral: true });
   }
 
-  // LOCK
+  // ---- Pull Panel
+  if (interaction.customId === "pull_panel") {
+    const panelChannel = interaction.guild.channels.cache.get(data.textId);
+    if (!panelChannel || !panelChannel.isTextBased()) {
+      return interaction.reply({ content: "❌ Panel channel missing.", ephemeral: true });
+    }
+    const panelMsg = await panelChannel.send(controlPanelPayload(data.ownerId, data.vcId)).catch(() => null);
+    if (panelMsg) tempVCs.set(data.vcId, { ...data, panelMsgId: panelMsg.id });
+    return interaction.reply({ content: "📌 Panel pulled.", ephemeral: true });
+  }
+
+  // ---- Lock
   if (interaction.customId === "lock") {
     await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { Connect: false }).catch(() => {});
     return interaction.reply({ content: "🔒 VC locked.", ephemeral: true });
   }
 
-  // UNLOCK
+  // ---- Unlock
   if (interaction.customId === "unlock") {
     await vc.permissionOverwrites.edit(interaction.guild.roles.everyone.id, { Connect: true }).catch(() => {});
     return interaction.reply({ content: "🔓 VC unlocked.", ephemeral: true });
   }
 
-  // LIMIT
+  // ---- Limit
   if (interaction.customId === "limit") {
     await interaction.reply({ content: "Send the new user limit (number).", ephemeral: true });
 
-    const panelChannel = interaction.channel;
     const filter = (m) => m.author.id === interaction.user.id;
-    const collected = await panelChannel.awaitMessages({ filter, max: 1, time: 15000 }).catch(() => null);
-
+    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 15000 }).catch(() => null);
     if (!collected || !collected.size) return;
-    const num = parseInt(collected.first().content, 10);
-    if (isNaN(num)) return collected.first().reply("❌ Invalid number.");
 
-    await vc.setUserLimit(Math.max(0, Math.min(num, 99))).catch(() => {});
-    return collected.first().reply(`👥 Limit set to **${num}**.`);
+    const num = parseInt(collected.first().content, 10);
+    if (isNaN(num) || num < 0 || num > 99) return collected.first().reply("❌ Invalid number (0-99).").catch(() => {});
+
+    await vc.setUserLimit(num).catch(() => {});
+    return collected.first().reply(`👥 Limit set to **${num}**.`).catch(() => {});
   }
 
-  // RENAME
+  // ---- Rename
   if (interaction.customId === "rename") {
     await interaction.reply({ content: "Send the new channel name.", ephemeral: true });
 
-    const panelChannel = interaction.channel;
     const filter = (m) => m.author.id === interaction.user.id;
-    const collected = await panelChannel.awaitMessages({ filter, max: 1, time: 15000 }).catch(() => null);
-
+    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 15000 }).catch(() => null);
     if (!collected || !collected.size) return;
-    const newName = collected.first().content.slice(0, 90);
 
+    const newName = safeName(collected.first().content, 90);
     await vc.setName(newName).catch(() => {});
-    return collected.first().reply(`✏️ Renamed to **${newName}**.`);
+    return collected.first().reply(`✏️ Renamed to **${newName}**.`).catch(() => {});
   }
 
-  // CLAIM
+  // ---- Claim (owner swap)
   if (interaction.customId === "claim") {
-    data.ownerId = interaction.user.id;
-    tempVCs.set(vc.id, data);
+    tempVCs.set(vc.id, { ...data, ownerId: interaction.user.id });
     return interaction.reply({ content: "👑 You now own this VC.", ephemeral: true });
-  }
-
-  // PULL PANEL
-  if (interaction.customId === "pullpanel") {
-    const sent = await sendPanelToText(interaction.guild, vc.id);
-    if (!sent) return interaction.reply({ content: "⚠️ Panel channel not found.", ephemeral: true });
-    return interaction.reply({ content: "✅ Panel pulled.", ephemeral: true });
-  }
-
-  // CLOSE VC (deletes VC + panel text)
-  if (interaction.customId === "closevc") {
-    const txt = interaction.guild.channels.cache.get(data.textId);
-    tempVCs.delete(vc.id);
-
-    await interaction.reply({ content: "🧨 Closing VC...", ephemeral: true }).catch(() => {});
-    vc.delete().catch(() => {});
-    if (txt) txt.delete().catch(() => {});
-    return;
   }
 });
 
-// -------------------- LOGIN --------------------
+// ----------------------
+// LOGIN
+// ----------------------
 client.login(process.env.TOKEN);
