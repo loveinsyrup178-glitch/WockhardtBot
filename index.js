@@ -1,6 +1,9 @@
 // =====================================
-// WOCKHARDT — ADVANCED TEMP VC SYSTEM v2
-// RAILWAY HARDENED • CRASH-PROOF
+// WOCKHARDT — ADVANCED TEMP VC SYSTEM v2 (WORKING)
+// JOIN-TO-CREATE + PRIVATE PANEL TEXT
+// Buttons: LOCK • UNLOCK • LIMIT • RENAME • CLAIM
+// Extra: PULL PANEL (command + button)
+// Staff can also use controls
 // =====================================
 
 require("dotenv").config();
@@ -17,35 +20,27 @@ const {
 } = require("discord.js");
 
 // ----------------------
-// GLOBAL CRASH GUARDS (CRITICAL)
-// ----------------------
-process.on("unhandledRejection", (reason) => {
-  console.error("❌ UNHANDLED PROMISE:", reason);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("❌ UNCAUGHT EXCEPTION:", err);
-});
-
-// ----------------------
 // CONFIG
 // ----------------------
 const PREFIX = "-";
 const CLEAR_PREFIX = "#";
-const OWNER_TARGET_ID = "1277264433823088692";
 
-const CREATE_VC_ID = process.env.CREATE_VC_ID;
-const CATEGORY_ID = process.env.CATEGORY_ID;
-const TOKEN = process.env.TOKEN;
+// USER WHOSE MESSAGES WILL BE DELETED
+const OWNER_USER_ID = "1277264433823088692";
 
-if (!TOKEN || !CREATE_VC_ID || !CATEGORY_ID) {
-  console.error("❌ MISSING ENV VARS");
-  process.exit(1);
-}
+// join-to-create VOICE channel
+const CREATE_VC_ID = process.env.CREATE_VC_ID || "1451498864350859264";
 
+// temp category (MUST be a category id)
+const CATEGORY_ID = process.env.CATEGORY_ID || "1411585822708469861";
+
+// temp VC naming
+const TEMP_NAME = process.env.TEMP_NAME || "💜・{username}";
+
+// optional: staff roles (comma separated role ids)
 const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 // ----------------------
@@ -62,24 +57,17 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-// ----------------------
+// key = vcId -> { ownerId, vcId, textId, panelMsgId }
 const tempVCs = new Map();
 
-// ----------------------
-// HELPERS
-// ----------------------
 function isStaff(member) {
-  try {
-    if (!member) return false;
-    if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
-    if (member.permissions.has(PermissionFlagsBits.ManageMessages)) return true;
-    if (member.permissions.has(PermissionFlagsBits.ManageChannels)) return true;
-    if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
-    if (STAFF_ROLE_IDS.some(id => member.roles.cache.has(id))) return true;
-    return false;
-  } catch {
-    return false;
-  }
+  if (!member) return false;
+  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+  if (member.permissions.has(PermissionFlagsBits.ManageChannels)) return true;
+  if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
+  if (member.permissions.has(PermissionFlagsBits.ManageMessages)) return true;
+  if (STAFF_ROLE_IDS.length && STAFF_ROLE_IDS.some((id) => member.roles.cache.has(id))) return true;
+  return false;
 }
 
 function safeName(str, max = 90) {
@@ -87,26 +75,32 @@ function safeName(str, max = 90) {
 }
 
 // ----------------------
-// PANEL
+// PANEL (buttons)
 // ----------------------
 function panelRows() {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("lock").setLabel("🔒 Lock").setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId("unlock").setLabel("🔓 Unlock").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId("limit").setLabel("👥 Limit").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("rename").setLabel("✏️ Rename").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("claim").setLabel("👑 Claim").setStyle(ButtonStyle.Success)
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("pull_panel").setLabel("📌 Pull Panel").setStyle(ButtonStyle.Secondary)
-    )
-  ];
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("lock").setLabel("🔒 Lock").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId("unlock").setLabel("🔓 Unlock").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("limit").setLabel("👥 Limit").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("rename").setLabel("✏️ Rename").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("claim").setLabel("👑 Claim").setStyle(ButtonStyle.Success)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("pull_panel").setLabel("📌 Pull Panel").setStyle(ButtonStyle.Secondary)
+  );
+
+  return [row1, row2];
 }
 
-function panelPayload(ownerId, vcId) {
+function controlPanelPayload(ownerId, vcId) {
   return {
-    content: `💜 **Temp VC for <@${ownerId}>**\n🔊 <#${vcId}>`,
+    content:
+      `💜 **Temp VC created for <@${ownerId}>**\n` +
+      `🔊 <#${vcId}>\n\n` +
+      `**Controls:** Lock / Unlock / Limit / Rename / Claim\n` +
+      `📌 Use **${PREFIX}panel** anytime to pull this again.`,
+    allowedMentions: { users: [ownerId] },
     components: panelRows(),
   };
 }
@@ -114,150 +108,117 @@ function panelPayload(ownerId, vcId) {
 // ----------------------
 // READY
 // ----------------------
-client.once("ready", () => {
-  console.log(`💜 ${client.user.tag} ONLINE (Railway Stable)`);
+client.once("ready", async () => {
+  console.log(`💜 ${client.user.tag} is online`);
 });
 
 // ----------------------
-// VOICE STATE
+// CREATE TEMP VC + PANEL TEXT
 // ----------------------
 client.on("voiceStateUpdate", async (oldState, newState) => {
-  try {
-    if (newState.channelId !== CREATE_VC_ID) return;
-
+  if (newState.channelId === CREATE_VC_ID) {
     const guild = newState.guild;
     const member = newState.member;
     if (!guild || !member) return;
 
-    const me = await guild.members.fetchMe();
-    const name = safeName(`💜・${member.user.username}`);
+    try {
+      const cat = guild.channels.cache.get(CATEGORY_ID);
+      if (!cat || cat.type !== ChannelType.GuildCategory) return;
 
-    const vc = await guild.channels.create({
-      name,
-      type: ChannelType.GuildVoice,
-      parent: CATEGORY_ID,
-      permissionOverwrites: [
-        { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect] },
-        { id: member.id, allow: [PermissionFlagsBits.ManageChannels, PermissionFlagsBits.MoveMembers] },
-        { id: me.id, allow: [PermissionFlagsBits.ManageChannels] },
-      ],
-    });
+      const me = await guild.members.fetchMe();
+      const baseName = safeName(TEMP_NAME.replace("{username}", member.user.username), 90);
 
-    const text = await guild.channels.create({
-      name: `${name}-panel`,
-      type: ChannelType.GuildText,
-      parent: CATEGORY_ID,
-      permissionOverwrites: [
-        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-        { id: member.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-        { id: me.id, allow: [PermissionFlagsBits.ManageMessages] },
-      ],
-    });
+      const newVC = await guild.channels.create({
+        name: baseName,
+        type: ChannelType.GuildVoice,
+        parent: CATEGORY_ID,
+      });
 
-    await member.voice.setChannel(vc).catch(() => {});
-    tempVCs.set(vc.id, { ownerId: member.id, vcId: vc.id, textId: text.id });
-    await text.send(panelPayload(member.id, vc.id));
-  } catch (err) {
-    console.error("❌ VC CREATE ERROR:", err);
+      const newText = await guild.channels.create({
+        name: safeName(`${baseName}-panel`, 90),
+        type: ChannelType.GuildText,
+        parent: CATEGORY_ID,
+      });
+
+      await member.voice.setChannel(newVC).catch(() => {});
+      tempVCs.set(newVC.id, { ownerId: member.id, vcId: newVC.id, textId: newText.id });
+
+      await newText.send(controlPanelPayload(member.id, newVC.id));
+    } catch (e) {
+      console.log("❌ Temp VC error:", e);
+    }
+  }
+
+  if (oldState.channelId && tempVCs.has(oldState.channelId)) {
+    const data = tempVCs.get(oldState.channelId);
+    const vc = oldState.guild.channels.cache.get(data.vcId);
+    if (vc && vc.members.size === 0) {
+      tempVCs.delete(vc.id);
+      vc.delete().catch(() => {});
+      oldState.guild.channels.cache.get(data.textId)?.delete().catch(() => {});
+    }
   }
 });
 
 // ----------------------
-// MESSAGE COMMANDS
+// COMMANDS
 // ----------------------
 client.on("messageCreate", async (msg) => {
-  try {
-    if (!msg.guild || msg.author.bot) return;
+  if (!msg.guild || msg.author.bot) return;
 
-    // PANEL
-    if (msg.content === "-panel") {
-      const member = await msg.guild.members.fetch(msg.author.id);
-      const vc = member.voice.channel;
-      if (!vc) return msg.reply("❌ Join your temp VC.");
+  const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
+  if (!member) return;
 
-      const data = tempVCs.get(vc.id);
-      if (!data) return;
+  // -------- PANEL
+  if (msg.content === `${PREFIX}panel`) {
+    const vc = member.voice?.channel;
+    if (!vc) return msg.reply("❌ Join your temp VC.");
 
-      if (msg.author.id !== data.ownerId && !isStaff(member))
-        return msg.reply("❌ Not allowed.");
-
-      msg.guild.channels.cache.get(data.textId)
-        ?.send(panelPayload(data.ownerId, data.vcId));
-    }
-
-    // CLEAR OWNER
-    if (msg.content === "#clearowner") {
-      const member = await msg.guild.members.fetch(msg.author.id);
-      if (!isStaff(member)) return msg.reply("❌ Staff only.");
-
-      const since = Date.now() - 86400000;
-      let total = 0;
-
-      for (const ch of msg.guild.channels.cache.values()) {
-        if (!ch.isTextBased()) continue;
-
-        let messages;
-        try {
-          messages = await ch.messages.fetch({ limit: 100 });
-        } catch {
-          continue;
-        }
-
-        const target = messages.filter(
-          m => m.author.id === OWNER_TARGET_ID && m.createdTimestamp >= since
-        );
-
-        if (target.size) {
-          await ch.bulkDelete(target, true).catch(() => {});
-          total += target.size;
-        }
-      }
-
-      msg.reply(`🧹 Deleted ${total} messages.`);
-    }
-  } catch (err) {
-    console.error("❌ MESSAGE ERROR:", err);
-  }
-});
-
-// ----------------------
-// BUTTONS
-// ----------------------
-client.on("interactionCreate", async (interaction) => {
-  try {
-    if (!interaction.isButton()) return;
-
-    const data = [...tempVCs.values()].find(d => d.textId === interaction.channelId);
+    const data = tempVCs.get(vc.id);
     if (!data) return;
 
-    const vc = interaction.guild.channels.cache.get(data.vcId);
-    if (!vc) return;
+    if (msg.author.id !== data.ownerId && !isStaff(member))
+      return msg.reply("❌ Only owner or staff.");
 
-    if (interaction.customId === "lock") {
-      await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
-      return interaction.reply({ content: "🔒 Locked", ephemeral: true });
+    msg.guild.channels.cache.get(data.textId)
+      ?.send(controlPanelPayload(data.ownerId, data.vcId));
+  }
+
+  // -------- CLEAR OWNER (NEW, SAFE)
+  if (msg.content === `${CLEAR_PREFIX}clearowner`) {
+    if (!isStaff(member))
+      return msg.reply("❌ Staff only.");
+
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    let deleted = 0;
+
+    for (const channel of msg.guild.channels.cache.values()) {
+      if (!channel.isTextBased()) continue;
+
+      let messages;
+      try {
+        messages = await channel.messages.fetch({ limit: 100 });
+      } catch {
+        continue;
+      }
+
+      const targets = messages.filter(
+        m =>
+          m.author.id === OWNER_USER_ID &&
+          m.createdTimestamp >= since
+      );
+
+      if (targets.size > 0) {
+        await channel.bulkDelete(targets, true).catch(() => {});
+        deleted += targets.size;
+      }
     }
 
-    if (interaction.customId === "unlock") {
-      await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: true });
-      return interaction.reply({ content: "🔓 Unlocked", ephemeral: true });
-    }
-
-    if (interaction.customId === "claim") {
-      data.ownerId = interaction.user.id;
-      return interaction.reply({ content: "👑 Claimed", ephemeral: true });
-    }
-
-    if (interaction.customId === "pull_panel") {
-      interaction.channel.send(panelPayload(data.ownerId, data.vcId));
-      return interaction.reply({ content: "📌 Panel pulled", ephemeral: true });
-    }
-  } catch (err) {
-    console.error("❌ BUTTON ERROR:", err);
+    msg.reply(`🧹 Deleted **${deleted}** messages from owner.`);
   }
 });
 
 // ----------------------
 // LOGIN
 // ----------------------
-client.login(TOKEN);
+client.login(process.env.TOKEN);
