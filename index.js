@@ -1,6 +1,6 @@
 // =====================================
 // WOCKHARDT — ADVANCED TEMP VC SYSTEM v2
-// Railway SAFE • NO SLASH REGISTRATION
+// RAILWAY HARDENED • CRASH-PROOF
 // =====================================
 
 require("dotenv").config();
@@ -17,6 +17,17 @@ const {
 } = require("discord.js");
 
 // ----------------------
+// GLOBAL CRASH GUARDS (CRITICAL)
+// ----------------------
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ UNHANDLED PROMISE:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ UNCAUGHT EXCEPTION:", err);
+});
+
+// ----------------------
 // CONFIG
 // ----------------------
 const PREFIX = "-";
@@ -25,10 +36,16 @@ const OWNER_TARGET_ID = "1277264433823088692";
 
 const CREATE_VC_ID = process.env.CREATE_VC_ID;
 const CATEGORY_ID = process.env.CATEGORY_ID;
+const TOKEN = process.env.TOKEN;
+
+if (!TOKEN || !CREATE_VC_ID || !CATEGORY_ID) {
+  console.error("❌ MISSING ENV VARS");
+  process.exit(1);
+}
 
 const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .split(",")
-  .map(r => r.trim())
+  .map(s => s.trim())
   .filter(Boolean);
 
 // ----------------------
@@ -46,21 +63,23 @@ const client = new Client({
 });
 
 // ----------------------
-// TEMP VC STORE
-// ----------------------
 const tempVCs = new Map();
 
 // ----------------------
 // HELPERS
 // ----------------------
 function isStaff(member) {
-  if (!member) return false;
-  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
-  if (member.permissions.has(PermissionFlagsBits.ManageMessages)) return true;
-  if (member.permissions.has(PermissionFlagsBits.ManageChannels)) return true;
-  if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
-  if (STAFF_ROLE_IDS.some(id => member.roles.cache.has(id))) return true;
-  return false;
+  try {
+    if (!member) return false;
+    if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+    if (member.permissions.has(PermissionFlagsBits.ManageMessages)) return true;
+    if (member.permissions.has(PermissionFlagsBits.ManageChannels)) return true;
+    if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
+    if (STAFF_ROLE_IDS.some(id => member.roles.cache.has(id))) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function safeName(str, max = 90) {
@@ -87,11 +106,7 @@ function panelRows() {
 
 function panelPayload(ownerId, vcId) {
   return {
-    content:
-      `💜 **Temp VC created for <@${ownerId}>**\n` +
-      `🔊 <#${vcId}>\n\n` +
-      `Use buttons below to control your VC.\n` +
-      `📌 Use **-panel** to pull again.`,
+    content: `💜 **Temp VC for <@${ownerId}>**\n🔊 <#${vcId}>`,
     components: panelRows(),
   };
 }
@@ -100,15 +115,16 @@ function panelPayload(ownerId, vcId) {
 // READY
 // ----------------------
 client.once("ready", () => {
-  console.log(`💜 ${client.user.tag} ONLINE`);
-  console.log("✅ Railway stable build running");
+  console.log(`💜 ${client.user.tag} ONLINE (Railway Stable)`);
 });
 
 // ----------------------
-// TEMP VC CREATE / DELETE
+// VOICE STATE
 // ----------------------
 client.on("voiceStateUpdate", async (oldState, newState) => {
-  if (newState.channelId === CREATE_VC_ID) {
+  try {
+    if (newState.channelId !== CREATE_VC_ID) return;
+
     const guild = newState.guild;
     const member = newState.member;
     if (!guild || !member) return;
@@ -138,115 +154,110 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       ],
     });
 
-    await member.voice.setChannel(vc);
-
+    await member.voice.setChannel(vc).catch(() => {});
     tempVCs.set(vc.id, { ownerId: member.id, vcId: vc.id, textId: text.id });
-
     await text.send(panelPayload(member.id, vc.id));
-  }
-
-  if (oldState.channelId && tempVCs.has(oldState.channelId)) {
-    const vc = oldState.guild.channels.cache.get(oldState.channelId);
-    if (vc && vc.members.size === 0) {
-      const data = tempVCs.get(vc.id);
-      tempVCs.delete(vc.id);
-      vc.delete().catch(() => {});
-      oldState.guild.channels.cache.get(data.textId)?.delete().catch(() => {});
-    }
+  } catch (err) {
+    console.error("❌ VC CREATE ERROR:", err);
   }
 });
 
 // ----------------------
-// COMMANDS
+// MESSAGE COMMANDS
 // ----------------------
-client.on("messageCreate", async msg => {
-  if (!msg.guild || msg.author.bot) return;
+client.on("messageCreate", async (msg) => {
+  try {
+    if (!msg.guild || msg.author.bot) return;
 
-  console.log("📩 MESSAGE:", msg.content);
+    // PANEL
+    if (msg.content === "-panel") {
+      const member = await msg.guild.members.fetch(msg.author.id);
+      const vc = member.voice.channel;
+      if (!vc) return msg.reply("❌ Join your temp VC.");
 
-  // -------- PANEL
-  if (msg.content === "-panel") {
-    const member = await msg.guild.members.fetch(msg.author.id);
-    const vc = member.voice.channel;
-    if (!vc) return msg.reply("❌ Join your temp VC.");
+      const data = tempVCs.get(vc.id);
+      if (!data) return;
 
-    const data = tempVCs.get(vc.id);
-    if (!data) return;
+      if (msg.author.id !== data.ownerId && !isStaff(member))
+        return msg.reply("❌ Not allowed.");
 
-    if (msg.author.id !== data.ownerId && !isStaff(member))
-      return msg.reply("❌ Not allowed.");
-
-    msg.guild.channels.cache.get(data.textId)
-      ?.send(panelPayload(data.ownerId, data.vcId));
-  }
-
-  // -------- CLEAR OWNER
-  if (msg.content === "#clearowner") {
-    const member = await msg.guild.members.fetch(msg.author.id);
-    if (!isStaff(member))
-      return msg.reply("❌ Staff only.");
-
-    const since = Date.now() - 24 * 60 * 60 * 1000;
-    let total = 0;
-
-    for (const channel of msg.guild.channels.cache.values()) {
-      if (!channel.isTextBased()) continue;
-
-      let messages;
-      try {
-        messages = await channel.messages.fetch({ limit: 100 });
-      } catch {
-        continue;
-      }
-
-      const target = messages.filter(
-        m => m.author.id === OWNER_TARGET_ID && m.createdTimestamp >= since
-      );
-
-      if (target.size) {
-        await channel.bulkDelete(target, true).catch(() => {});
-        total += target.size;
-      }
+      msg.guild.channels.cache.get(data.textId)
+        ?.send(panelPayload(data.ownerId, data.vcId));
     }
 
-    msg.reply(`🧹 Deleted **${total}** owner messages.`);
+    // CLEAR OWNER
+    if (msg.content === "#clearowner") {
+      const member = await msg.guild.members.fetch(msg.author.id);
+      if (!isStaff(member)) return msg.reply("❌ Staff only.");
+
+      const since = Date.now() - 86400000;
+      let total = 0;
+
+      for (const ch of msg.guild.channels.cache.values()) {
+        if (!ch.isTextBased()) continue;
+
+        let messages;
+        try {
+          messages = await ch.messages.fetch({ limit: 100 });
+        } catch {
+          continue;
+        }
+
+        const target = messages.filter(
+          m => m.author.id === OWNER_TARGET_ID && m.createdTimestamp >= since
+        );
+
+        if (target.size) {
+          await ch.bulkDelete(target, true).catch(() => {});
+          total += target.size;
+        }
+      }
+
+      msg.reply(`🧹 Deleted ${total} messages.`);
+    }
+  } catch (err) {
+    console.error("❌ MESSAGE ERROR:", err);
   }
 });
 
 // ----------------------
 // BUTTONS
 // ----------------------
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isButton()) return;
+client.on("interactionCreate", async (interaction) => {
+  try {
+    if (!interaction.isButton()) return;
 
-  const data = [...tempVCs.values()].find(d => d.textId === interaction.channelId);
-  if (!data) return;
+    const data = [...tempVCs.values()].find(d => d.textId === interaction.channelId);
+    if (!data) return;
 
-  const vc = interaction.guild.channels.cache.get(data.vcId);
-  if (!vc) return;
+    const vc = interaction.guild.channels.cache.get(data.vcId);
+    if (!vc) return;
 
-  if (interaction.customId === "lock") {
-    await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
-    return interaction.reply({ content: "🔒 Locked", ephemeral: true });
-  }
+    if (interaction.customId === "lock") {
+      await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
+      return interaction.reply({ content: "🔒 Locked", ephemeral: true });
+    }
 
-  if (interaction.customId === "unlock") {
-    await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: true });
-    return interaction.reply({ content: "🔓 Unlocked", ephemeral: true });
-  }
+    if (interaction.customId === "unlock") {
+      await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: true });
+      return interaction.reply({ content: "🔓 Unlocked", ephemeral: true });
+    }
 
-  if (interaction.customId === "claim") {
-    data.ownerId = interaction.user.id;
-    return interaction.reply({ content: "👑 Claimed", ephemeral: true });
-  }
+    if (interaction.customId === "claim") {
+      data.ownerId = interaction.user.id;
+      return interaction.reply({ content: "👑 Claimed", ephemeral: true });
+    }
 
-  if (interaction.customId === "pull_panel") {
-    interaction.channel.send(panelPayload(data.ownerId, data.vcId));
-    return interaction.reply({ content: "📌 Panel pulled", ephemeral: true });
+    if (interaction.customId === "pull_panel") {
+      interaction.channel.send(panelPayload(data.ownerId, data.vcId));
+      return interaction.reply({ content: "📌 Panel pulled", ephemeral: true });
+    }
+  } catch (err) {
+    console.error("❌ BUTTON ERROR:", err);
   }
 });
 
 // ----------------------
 // LOGIN
 // ----------------------
-client.login(process.env.TOKEN);
+client.login(TOKEN);
