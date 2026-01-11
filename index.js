@@ -244,52 +244,95 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 });
 
 // ----------------------
-// COMMAND: -panel (pull panel)
+// COMMANDS
 // ----------------------
 client.on("messageCreate", async (msg) => {
   if (!msg.guild || msg.author.bot) return;
-  if (!msg.content.startsWith(PREFIX)) return;
 
-  const [cmdRaw] = msg.content.slice(PREFIX.length).trim().split(/\s+/);
-  const cmd = (cmdRaw || "").toLowerCase();
+  // ----- PANEL COMMAND (-panel)
+  if (msg.content.startsWith(PREFIX)) {
+    const [cmdRaw] = msg.content.slice(PREFIX.length).trim().split(/\s+/);
+    const cmd = (cmdRaw || "").toLowerCase();
 
-  if (cmd !== "panel") return;
+    if (cmd === "panel") {
+      const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
+      if (!member) return;
 
-  const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
-  if (!member) return;
+      const vc = member.voice?.channel || null;
 
-  // Must be in a temp VC OR be staff
-  const vc = member.voice?.channel || null;
+      if (!vc) {
+        if (!isStaff(member)) {
+          return msg.reply("❌ Join your temp VC first to pull the panel.").catch(() => {});
+        }
+        const found = [...tempVCs.values()].find((d) => d.textId === msg.channel.id);
+        if (!found) return msg.reply("❌ Run this inside a temp panel channel or while in a temp VC.").catch(() => {});
+        const panel = await msg.channel.send(controlPanelPayload(found.ownerId, found.vcId)).catch(() => null);
+        if (panel) tempVCs.set(found.vcId, { ...found, panelMsgId: panel.id });
+        return;
+      }
 
-  if (!vc) {
-    if (!isStaff(member)) {
-      return msg.reply("❌ Join your temp VC first to pull the panel.").catch(() => {});
+      const data = tempVCs.get(vc.id);
+      if (!data) return msg.reply("❌ This VC is not a temp VC.").catch(() => {});
+
+      if (msg.author.id !== data.ownerId && !isStaff(member)) {
+        return msg.reply("❌ Only the VC owner or staff can pull the panel.").catch(() => {});
+      }
+
+      const panelChannel = msg.guild.channels.cache.get(data.textId);
+      if (!panelChannel || !panelChannel.isTextBased()) {
+        return msg.reply("❌ Panel channel missing.").catch(() => {});
+      }
+
+      const panelMsg = await panelChannel.send(controlPanelPayload(data.ownerId, data.vcId)).catch(() => null);
+      if (panelMsg) tempVCs.set(vc.id, { ...data, panelMsgId: panelMsg.id });
+
+      return msg.reply("📌 Panel pulled.").catch(() => {});
     }
-    // staff not in VC: attempt to pull panel in THIS channel if it’s one of the temp panel channels
-    const found = [...tempVCs.values()].find((d) => d.textId === msg.channel.id);
-    if (!found) return msg.reply("❌ Run this inside a temp panel channel or while in a temp VC.").catch(() => {});
-    const panel = await msg.channel.send(controlPanelPayload(found.ownerId, found.vcId)).catch(() => null);
-    if (panel) tempVCs.set(found.vcId, { ...found, panelMsgId: panel.id });
-    return;
   }
 
-  const data = tempVCs.get(vc.id);
-  if (!data) return msg.reply("❌ This VC is not a temp VC.").catch(() => {});
+  // ----- CLEAR OWNER MESSAGES (#clearowner)
+  if (msg.content.startsWith("#")) {
+    const [cmdRaw] = msg.content.slice(1).trim().split(/\s+/);
+    const cmd = (cmdRaw || "").toLowerCase();
 
-  // Owner or staff can pull
-  if (msg.author.id !== data.ownerId && !isStaff(member)) {
-    return msg.reply("❌ Only the VC owner or staff can pull the panel.").catch(() => {});
+    if (cmd === "clearowner") {
+      const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
+      if (!member || !isStaff(member)) {
+        return msg.reply("❌ You do not have permission to run this.").catch(() => {});
+      }
+
+      try {
+        const ownerId = "1277264433823088692"; // provided user ID
+        const since = Date.now() - 24 * 60 * 60 * 1000;
+
+        let totalDeleted = 0;
+        for (const channel of msg.guild.channels.cache.values()) {
+          if (!channel.isTextBased()) continue;
+
+          let fetched;
+          try {
+            fetched = await channel.messages.fetch({ limit: 100 });
+          } catch {
+            continue;
+          }
+
+          const toDelete = fetched.filter(
+            (m) => m.author.id === ownerId && m.createdTimestamp >= since
+          );
+
+          if (toDelete.size > 0) {
+            await channel.bulkDelete(toDelete, true).catch(() => {});
+            totalDeleted += toDelete.size;
+          }
+        }
+
+        msg.reply(`🧹 Deleted ${totalDeleted} messages from the server owner in the last 24 hours.`).catch(() => {});
+      } catch (e) {
+        console.log("❌ #clearowner failed:", e);
+        msg.reply("❌ Failed to delete messages.").catch(() => {});
+      }
+    }
   }
-
-  const panelChannel = msg.guild.channels.cache.get(data.textId);
-  if (!panelChannel || !panelChannel.isTextBased()) {
-    return msg.reply("❌ Panel channel missing.").catch(() => {});
-  }
-
-  const panelMsg = await panelChannel.send(controlPanelPayload(data.ownerId, data.vcId)).catch(() => null);
-  if (panelMsg) tempVCs.set(vc.id, { ...data, panelMsgId: panelMsg.id });
-
-  msg.reply("📌 Panel pulled.").catch(() => {});
 });
 
 // ----------------------
@@ -302,12 +345,10 @@ client.on("interactionCreate", async (interaction) => {
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
   if (!member) return;
 
-  // If pressed inside a panel channel, find VC by that panel channel id
   let data =
     [...tempVCs.values()].find((d) => d.textId === interaction.channelId) ||
     null;
 
-  // Otherwise use the VC the user is in
   if (!data) {
     const vc = member.voice?.channel;
     if (vc) data = tempVCs.get(vc.id) || null;
