@@ -1,6 +1,6 @@
 // =====================================
 // WOCKHARDT — ADVANCED TEMP VC SYSTEM v2
-// Railway-safe + Slash Command ClearOwner
+// Railway SAFE • NO SLASH REGISTRATION
 // =====================================
 
 require("dotenv").config();
@@ -14,15 +14,13 @@ const {
   ButtonStyle,
   ChannelType,
   PermissionFlagsBits,
-  REST,
-  Routes,
-  SlashCommandBuilder,
 } = require("discord.js");
 
 // ----------------------
 // CONFIG
 // ----------------------
 const PREFIX = "-";
+const CLEAR_PREFIX = "#";
 const OWNER_TARGET_ID = "1277264433823088692";
 
 const CREATE_VC_ID = process.env.CREATE_VC_ID;
@@ -99,23 +97,11 @@ function panelPayload(ownerId, vcId) {
 }
 
 // ----------------------
-// READY + SLASH REGISTER
+// READY
 // ----------------------
-client.once("ready", async () => {
+client.once("ready", () => {
   console.log(`💜 ${client.user.tag} ONLINE`);
-
-  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-
-  const command = new SlashCommandBuilder()
-    .setName("clearowner")
-    .setDescription("Delete owner's messages from last 24 hours");
-
-  await rest.put(
-    Routes.applicationCommands(client.user.id),
-    { body: [command.toJSON()] }
-  );
-
-  console.log("✅ Slash command /clearowner registered");
+  console.log("✅ Railway stable build running");
 });
 
 // ----------------------
@@ -128,7 +114,6 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     if (!guild || !member) return;
 
     const me = await guild.members.fetchMe();
-
     const name = safeName(`💜・${member.user.username}`);
 
     const vc = await guild.channels.create({
@@ -172,12 +157,14 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 });
 
 // ----------------------
-// PREFIX PANEL COMMAND
+// COMMANDS
 // ----------------------
 client.on("messageCreate", async msg => {
   if (!msg.guild || msg.author.bot) return;
-  if (!msg.content.startsWith(PREFIX)) return;
 
+  console.log("📩 MESSAGE:", msg.content);
+
+  // -------- PANEL
   if (msg.content === "-panel") {
     const member = await msg.guild.members.fetch(msg.author.id);
     const vc = member.voice.channel;
@@ -189,48 +176,41 @@ client.on("messageCreate", async msg => {
     if (msg.author.id !== data.ownerId && !isStaff(member))
       return msg.reply("❌ Not allowed.");
 
-    const panelChannel = msg.guild.channels.cache.get(data.textId);
-    panelChannel?.send(panelPayload(data.ownerId, data.vcId));
-  }
-});
-
-// ----------------------
-// SLASH COMMAND: /clearowner
-// ----------------------
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "clearowner") return;
-
-  const member = await interaction.guild.members.fetch(interaction.user.id);
-  if (!isStaff(member))
-    return interaction.reply({ content: "❌ Staff only.", ephemeral: true });
-
-  await interaction.reply({ content: "🧹 Cleaning messages...", ephemeral: true });
-
-  const since = Date.now() - 24 * 60 * 60 * 1000;
-  let total = 0;
-
-  for (const channel of interaction.guild.channels.cache.values()) {
-    if (!channel.isTextBased()) continue;
-
-    let messages;
-    try {
-      messages = await channel.messages.fetch({ limit: 100 });
-    } catch {
-      continue;
-    }
-
-    const target = messages.filter(
-      m => m.author.id === OWNER_TARGET_ID && m.createdTimestamp >= since
-    );
-
-    if (target.size) {
-      await channel.bulkDelete(target, true).catch(() => {});
-      total += target.size;
-    }
+    msg.guild.channels.cache.get(data.textId)
+      ?.send(panelPayload(data.ownerId, data.vcId));
   }
 
-  await interaction.editReply(`✅ Deleted **${total}** messages from owner.`);
+  // -------- CLEAR OWNER
+  if (msg.content === "#clearowner") {
+    const member = await msg.guild.members.fetch(msg.author.id);
+    if (!isStaff(member))
+      return msg.reply("❌ Staff only.");
+
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    let total = 0;
+
+    for (const channel of msg.guild.channels.cache.values()) {
+      if (!channel.isTextBased()) continue;
+
+      let messages;
+      try {
+        messages = await channel.messages.fetch({ limit: 100 });
+      } catch {
+        continue;
+      }
+
+      const target = messages.filter(
+        m => m.author.id === OWNER_TARGET_ID && m.createdTimestamp >= since
+      );
+
+      if (target.size) {
+        await channel.bulkDelete(target, true).catch(() => {});
+        total += target.size;
+      }
+    }
+
+    msg.reply(`🧹 Deleted **${total}** owner messages.`);
+  }
 });
 
 // ----------------------
@@ -239,7 +219,6 @@ client.on("interactionCreate", async interaction => {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
 
-  const member = await interaction.guild.members.fetch(interaction.user.id);
   const data = [...tempVCs.values()].find(d => d.textId === interaction.channelId);
   if (!data) return;
 
