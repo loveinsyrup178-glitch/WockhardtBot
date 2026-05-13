@@ -44,10 +44,6 @@ const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// DM config
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
-const GUILD_ID = process.env.GUILD_ID;
-
 // ----------------------
 // CLIENT
 // ----------------------
@@ -127,7 +123,7 @@ async function sendMassDM(member, targets, messageContent, replyMsg) {
     try {
       await target.send(messageContent);
       success++;
-      await sleep(1000); // rate limit protection
+      await sleep(1000);
     } catch (err) {
       if (err.code === 50007) {
         dmsClosed++;
@@ -202,6 +198,91 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 });
 
 // ----------------------
+// INTERACTIONS (buttons)
+// ----------------------
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton()) return;
+  if (!interaction.guild) return;
+
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!member) return;
+
+  const customId = interaction.customId;
+  const vc = member.voice?.channel;
+  if (!vc) return interaction.reply({ content: "❌ Join your temp VC first.", ephemeral: true });
+
+  const data = tempVCs.get(vc.id);
+  if (!data) return interaction.reply({ content: "❌ Not a temp VC.", ephemeral: true });
+
+  const isOwner = interaction.user.id === data.ownerId;
+  const staff = isStaff(member);
+
+  if (!isOwner && !staff)
+    return interaction.reply({ content: "❌ Only owner or staff.", ephemeral: true });
+
+  // LOCK
+  if (customId === "lock") {
+    await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
+    return interaction.reply({ content: "🔒 VC locked.", ephemeral: true });
+  }
+
+  // UNLOCK
+  if (customId === "unlock") {
+    await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: true });
+    return interaction.reply({ content: "🔓 VC unlocked.", ephemeral: true });
+  }
+
+  // LIMIT
+  if (customId === "limit") {
+    await interaction.reply({ content: "Reply with the user limit (1-99, or 0 for unlimited).", ephemeral: true });
+    const filter = (m) => m.author.id === interaction.user.id;
+    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ["time"] }).catch(() => null);
+    if (!collected) return;
+    const limit = parseInt(collected.first().content);
+    if (isNaN(limit) || limit < 0 || limit > 99) return interaction.followUp({ content: "❌ Invalid number.", ephemeral: true });
+    await vc.setUserLimit(limit);
+    return interaction.followUp({ content: `👥 User limit set to ${limit || "unlimited"}.`, ephemeral: true });
+  }
+
+  // RENAME
+  if (customId === "rename") {
+    await interaction.reply({ content: "Reply with the new VC name.", ephemeral: true });
+    const filter = (m) => m.author.id === interaction.user.id;
+    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ["time"] }).catch(() => null);
+    if (!collected) return;
+    const newName = safeName(collected.first().content, 90);
+    await vc.setName(newName);
+    return interaction.followUp({ content: `✏️ Renamed to **${newName}**.`, ephemeral: true });
+  }
+
+  // CLAIM
+  if (customId === "claim") {
+    if (isOwner) return interaction.reply({ content: "❌ You already own this VC.", ephemeral: true });
+    if (!staff) return interaction.reply({ content: "❌ Only staff can claim.", ephemeral: true });
+    data.ownerId = interaction.user.id;
+    tempVCs.set(vc.id, data);
+    const textCh = interaction.guild.channels.cache.get(data.textId);
+    if (textCh) {
+      const msgs = await textCh.messages.fetch({ limit: 10 }).catch(() => null);
+      if (msgs) {
+        const panelMsg = msgs.find((m) => m.author.id === client.user.id && m.components.length > 0);
+        if (panelMsg) await panelMsg.edit(controlPanelPayload(data.ownerId, data.vcId));
+      }
+    }
+    return interaction.reply({ content: "👑 VC claimed.", ephemeral: true });
+  }
+
+  // PULL PANEL
+  if (customId === "pull_panel") {
+    const textCh = interaction.guild.channels.cache.get(data.textId);
+    if (textCh) {
+      await textCh.send(controlPanelPayload(data.ownerId, data.vcId));
+      return interaction.reply({ content: "📌 Panel pulled.", ephemeral: true });
+    }
+  }
+});
+
+// ----------------------
 // COMMANDS
 // ----------------------
 client.on("messageCreate", async (msg) => {
@@ -244,7 +325,7 @@ client.on("messageCreate", async (msg) => {
       }
 
       const targets = messages.filter(
-        m =>
+        (m) =>
           m.author.id === OWNER_USER_ID &&
           m.createdTimestamp >= since
       );
