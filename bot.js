@@ -4,7 +4,7 @@
 // Buttons: LOCK • UNLOCK • LIMIT • RENAME • CLAIM
 // Extra: PULL PANEL (command + button)
 // Staff can also use controls
-// NEW: -dm <roleid> <message> | -dmhere <message>
+// NEW: -dm <roleid> <message> | -dmhere <message> (BULK DM SUPPORT)
 // =====================================
 
 require("dotenv").config();
@@ -44,6 +44,10 @@ const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+// DM config for bulk sending
+const DM_DELAY_MS = parseInt(process.env.DM_DELAY_MS) || 5000; // 5 seconds default between DMs
+const DM_BATCH_SIZE = parseInt(process.env.DM_BATCH_SIZE) || 50; // progress update every 50 DMs
+
 // ----------------------
 // CLIENT
 // ----------------------
@@ -60,6 +64,9 @@ const client = new Client({
 
 // key = vcId -> { ownerId, vcId, textId, panelMsgId }
 const tempVCs = new Map();
+
+// Track active DM jobs to prevent overlap
+const activeDMJobs = new Map();
 
 function isStaff(member) {
   if (!member) return false;
@@ -107,39 +114,86 @@ function controlPanelPayload(ownerId, vcId) {
 }
 
 // ----------------------
-// DM HELPER
+// DM HELPER (BULK SUPPORT)
 // ----------------------
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function sendMassDM(member, targets, messageContent, replyMsg) {
+function formatTime(ms) {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
+
+async function sendMassDM(member, targets, messageContent, replyMsg, jobId) {
   let success = 0;
   let failed = 0;
   let dmsClosed = 0;
+  const total = targets.length;
+  const startTime = Date.now();
 
-  for (const target of targets) {
+  activeDMJobs.set(jobId, { total, success, failed, dmsClosed, active: true });
+
+  for (let i = 0; i < targets.length; i++) {
+    // Check if job was cancelled
+    if (!activeDMJobs.get(jobId)?.active) {
+      await replyMsg.edit(`🛑 DM job cancelled by user.\nProgress: **${success}** sent, **${dmsClosed}** closed, **${failed}** failed.`);
+      activeDMJobs.delete(jobId);
+      return;
+    }
+
+    const target = targets[i];
     if (target.bot) continue;
+
     try {
       await target.send(messageContent);
       success++;
-      await sleep(1000);
     } catch (err) {
       if (err.code === 50007) {
         dmsClosed++;
+      } else if (err.code === 429) {
+        // Rate limited - wait longer
+        const retryAfter = err.retry_after || 60;
+        await replyMsg.edit(`⏳ Rate limited! Waiting **${retryAfter}** seconds...\nProgress: **${success}/${total}** sent`);
+        await sleep(retryAfter * 1000);
+        i--; // retry this user
+        continue;
       } else {
         failed++;
       }
-      await sleep(1000);
     }
+
+    // Update progress every batch
+    if ((i + 1) % DM_BATCH_SIZE === 0 || i === targets.length - 1) {
+      const elapsed = Date.now() - startTime;
+      const avgTimePerDM = elapsed / (i + 1);
+      const remaining = total - (i + 1);
+      const eta = avgTimePerDM * remaining;
+
+      const progressBar = "█".repeat(Math.floor((i + 1) / total * 10)) + "░".repeat(10 - Math.floor((i + 1) / total * 10));
+
+      await replyMsg.edit(
+        `📨 **Bulk DM Progress** [${progressBar}]\n` +
+        `**${i + 1}/${total}** processed | ✅ ${success} | 🔒 ${dmsClosed} | ❌ ${failed}\n` +
+        `⏱️ Elapsed: ${formatTime(elapsed)} | ETA: ${formatTime(eta)}`
+      );
+    }
+
+    await sleep(DM_DELAY_MS);
   }
 
-  const results = [];
-  if (success) results.push(`✅ **${success}** sent`);
-  if (dmsClosed) results.push(`🔒 **${dmsClosed}** DMs closed`);
-  if (failed) results.push(`❌ **${failed}** failed`);
+  activeDMJobs.delete(jobId);
 
-  await replyMsg.edit(`📨 DM Results — ${member.user.username}\n${results.join(" | ")}`);
+  const elapsed = Date.now() - startTime;
+  await replyMsg.edit(
+    `✅ **Bulk DM Complete!**\n` +
+    `📊 Total: **${total}** | ✅ Sent: **${success}** | 🔒 DMs Closed: **${dmsClosed}** | ❌ Failed: **${failed}**\n` +
+    `⏱️ Total time: ${formatTime(elapsed)}`
+  );
 }
 
 // ----------------------
@@ -147,6 +201,7 @@ async function sendMassDM(member, targets, messageContent, replyMsg) {
 // ----------------------
 client.once("ready", async () => {
   console.log(`💜 ${client.user.tag} is online`);
+  console.log(`📨 DM delay: ${DM_DELAY_MS}ms | Batch size: ${DM_BATCH_SIZE}`);
 });
 
 // ----------------------
@@ -339,7 +394,7 @@ client.on("messageCreate", async (msg) => {
     msg.reply(`🧹 Deleted **${deleted}** messages from owner.`);
   }
 
-  // -------- DM ROLE (STAFF ONLY)
+  // -------- DM ROLE (STAFF ONLY - BULK)
   if (msg.content.startsWith(`${PREFIX}dm `)) {
     if (!isStaff(member))
       return msg.reply("❌ Staff only.");
@@ -354,13 +409,30 @@ client.on("messageCreate", async (msg) => {
     if (!role)
       return msg.reply("❌ Role not found.");
 
-    const targets = role.members.map((m) => m);
+    const targets = role.members.map((m) => m).filter((m) => !m.bot);
     if (targets.length === 0)
       return msg.reply("❌ No members in that role.");
 
-    const statusMsg = await msg.reply(`📨 Sending to **${targets.length}** members with role **${role.name}**...`);
+    const estimatedTime = targets.length * DM_DELAY_MS;
+    const confirmMsg = await msg.reply(
+      `⚠️ **Bulk DM Warning**\n` +
+      `📊 Targets: **${targets.length}** members with role **${role.name}**\n` +
+      `⏱️ Estimated time: **${formatTime(estimatedTime)}**\n` +
+      `🐌 Delay between DMs: **${DM_DELAY_MS / 1000}s**\n\n` +
+      `Reply with **yes** to start, or **cancel** to abort.`
+    );
 
-    await sendMassDM(member, targets, messageContent, statusMsg);
+    const filter = (m) => m.author.id === msg.author.id && ["yes", "cancel"].includes(m.content.toLowerCase());
+    const collected = await msg.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ["time"] }).catch(() => null);
+
+    if (!collected || collected.first().content.toLowerCase() !== "yes") {
+      return confirmMsg.edit("🛑 DM job cancelled.");
+    }
+
+    const jobId = `${msg.author.id}-${Date.now()}`;
+    const statusMsg = await msg.reply(`🚀 Starting bulk DM to **${targets.length}** members...`);
+
+    await sendMassDM(member, targets, messageContent, statusMsg, jobId);
   }
 
   // -------- DM VC MEMBERS (STAFF ONLY)
@@ -376,13 +448,34 @@ client.on("messageCreate", async (msg) => {
     if (!vc)
       return msg.reply("❌ Join a voice channel first.");
 
-    const targets = vc.members.map((m) => m);
+    const targets = vc.members.map((m) => m).filter((m) => !m.bot);
     if (targets.length === 0)
       return msg.reply("❌ No one in this VC.");
 
     const statusMsg = await msg.reply(`📨 Sending to **${targets.length}** members in **${vc.name}**...`);
 
-    await sendMassDM(member, targets, messageContent, statusMsg);
+    const jobId = `${msg.author.id}-${Date.now()}`;
+    await sendMassDM(member, targets, messageContent, statusMsg, jobId);
+  }
+
+  // -------- CANCEL DM JOB
+  if (msg.content === `${PREFIX}dmcancel`) {
+    if (!isStaff(member))
+      return msg.reply("❌ Staff only.");
+
+    let cancelled = 0;
+    for (const [jobId, job] of activeDMJobs) {
+      if (jobId.startsWith(msg.author.id)) {
+        job.active = false;
+        cancelled++;
+      }
+    }
+
+    if (cancelled > 0) {
+      msg.reply(`🛑 Cancelled **${cancelled}** active DM job(s).`);
+    } else {
+      msg.reply("❌ No active DM jobs to cancel.");
+    }
   }
 });
 
