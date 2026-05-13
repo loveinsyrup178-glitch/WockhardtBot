@@ -4,6 +4,7 @@
 // Buttons: LOCK • UNLOCK • LIMIT • RENAME • CLAIM
 // Extra: PULL PANEL (command + button)
 // Staff can also use controls
+// NEW: -dm <roleid> <message> | -dmhere <message>
 // =====================================
 
 require("dotenv").config();
@@ -42,6 +43,10 @@ const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+// DM config
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
+const GUILD_ID = process.env.GUILD_ID;
 
 // ----------------------
 // CLIENT
@@ -103,6 +108,42 @@ function controlPanelPayload(ownerId, vcId) {
     allowedMentions: { users: [ownerId] },
     components: panelRows(),
   };
+}
+
+// ----------------------
+// DM HELPER
+// ----------------------
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendMassDM(member, targets, messageContent, replyMsg) {
+  let success = 0;
+  let failed = 0;
+  let dmsClosed = 0;
+
+  for (const target of targets) {
+    if (target.bot) continue;
+    try {
+      await target.send(messageContent);
+      success++;
+      await sleep(1000); // rate limit protection
+    } catch (err) {
+      if (err.code === 50007) {
+        dmsClosed++;
+      } else {
+        failed++;
+      }
+      await sleep(1000);
+    }
+  }
+
+  const results = [];
+  if (success) results.push(`✅ **${success}** sent`);
+  if (dmsClosed) results.push(`🔒 **${dmsClosed}** DMs closed`);
+  if (failed) results.push(`❌ **${failed}** failed`);
+
+  await replyMsg.edit(`📨 DM Results — ${member.user.username}\n${results.join(" | ")}`);
 }
 
 // ----------------------
@@ -215,6 +256,52 @@ client.on("messageCreate", async (msg) => {
     }
 
     msg.reply(`🧹 Deleted **${deleted}** messages from owner.`);
+  }
+
+  // -------- DM ROLE (STAFF ONLY)
+  if (msg.content.startsWith(`${PREFIX}dm `)) {
+    if (!isStaff(member))
+      return msg.reply("❌ Staff only.");
+
+    const args = msg.content.slice(`${PREFIX}dm `.length).trim();
+    const roleIdMatch = args.match(/^(\d+)\s+(.+)$/s);
+    if (!roleIdMatch)
+      return msg.reply("Usage: `-dm <roleid> <message>`");
+
+    const [, roleId, messageContent] = roleIdMatch;
+    const role = msg.guild.roles.cache.get(roleId);
+    if (!role)
+      return msg.reply("❌ Role not found.");
+
+    const targets = role.members.map((m) => m);
+    if (targets.length === 0)
+      return msg.reply("❌ No members in that role.");
+
+    const statusMsg = await msg.reply(`📨 Sending to **${targets.length}** members with role **${role.name}**...`);
+
+    await sendMassDM(member, targets, messageContent, statusMsg);
+  }
+
+  // -------- DM VC MEMBERS (STAFF ONLY)
+  if (msg.content.startsWith(`${PREFIX}dmhere `)) {
+    if (!isStaff(member))
+      return msg.reply("❌ Staff only.");
+
+    const messageContent = msg.content.slice(`${PREFIX}dmhere `.length).trim();
+    if (!messageContent)
+      return msg.reply("Usage: `-dmhere <message>`");
+
+    const vc = member.voice?.channel;
+    if (!vc)
+      return msg.reply("❌ Join a voice channel first.");
+
+    const targets = vc.members.map((m) => m);
+    if (targets.length === 0)
+      return msg.reply("❌ No one in this VC.");
+
+    const statusMsg = await msg.reply(`📨 Sending to **${targets.length}** members in **${vc.name}**...`);
+
+    await sendMassDM(member, targets, messageContent, statusMsg);
   }
 });
 
