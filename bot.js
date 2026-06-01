@@ -4,7 +4,7 @@
 // Buttons: LOCK • UNLOCK • LIMIT • RENAME • CLAIM
 // Extra: PULL PANEL (command + button)
 // Staff can also use controls
-// NEW: -dm <message> (ALL) | -dmhere <message> (VC) | -dmuser <userid> <message> (ONE)
+// NEW: -dm <message> (ALL) | -dmhere <message> (VC) | -dmuser @name <message> (ONE)
 // =====================================
 
 require("dotenv").config();
@@ -324,33 +324,50 @@ client.on("messageCreate", async (msg) => {
     msg.reply(`🧹 Deleted **${deleted}** messages.`);
   }
 
-  // DM ONE USER
+  // DM ONE USER — supports @mention or user ID
   if (msg.content.startsWith(`${PREFIX}dmuser `)) {
     if (!isStaff(member)) return msg.reply("❌ Staff only.");
 
-    const args = msg.content.slice(`${PREFIX}dmuser `.length).trim();
-    const match = args.match(/^(\d+)\s+(.+)$/s);
-    if (!match) return msg.reply("Usage: `-dmuser <userid> <message>`");
-
-    const [, userId, messageContent] = match;
+    // Get everything after "-dmuser "
+    const fullArgs = msg.content.slice(`${PREFIX}dmuser `.length).trim();
     
-    let target;
-    try {
-      target = await client.users.fetch(userId);
-    } catch {
-      return msg.reply("❌ User not found. Make sure the ID is correct.");
+    // Try to find a mention in the message
+    const mentionMatch = msg.mentions.users.first();
+    let targetUser = null;
+    let messageContent = "";
+
+    if (mentionMatch) {
+      // User was @mentioned
+      targetUser = mentionMatch;
+      // Remove the mention from the message to get the actual message content
+      // Mentions look like <@123456789> or <@!123456789>
+      messageContent = fullArgs.replace(/<@!?(\d+)>/g, "").trim();
+    } else {
+      // No mention, try to parse user ID from start of message
+      const idMatch = fullArgs.match(/^(\d{17,20})\s+(.+)$/s);
+      if (!idMatch) return msg.reply("Usage: `-dmuser @username message` or `-dmuser 1234567890123456789 message`");
+      
+      const [, userId, msgText] = idMatch;
+      try {
+        targetUser = await client.users.fetch(userId);
+        messageContent = msgText;
+      } catch {
+        return msg.reply("❌ User not found.");
+      }
     }
 
-    const result = await sendDMWithRetry(target, messageContent);
+    if (!messageContent) return msg.reply("❌ Message cannot be empty.");
+
+    const result = await sendDMWithRetry(targetUser, messageContent);
     
     if (result.success) {
-      msg.reply(`✅ DM sent to **${target.tag}** (\`${userId}\`)`);
+      msg.reply(`✅ DM sent to **${targetUser.tag}**`);
     } else if (result.closed) {
-      msg.reply(`🔒 **${target.tag}** has DMs closed.`);
+      msg.reply(`🔒 **${targetUser.tag}** has DMs closed.`);
     } else if (result.rateLimited) {
       msg.reply(`⏳ Rate limited. Try again in a minute.`);
     } else {
-      msg.reply(`❌ Failed to DM **${target.tag}**: ${result.error || "Unknown error"}`);
+      msg.reply(`❌ Failed to DM **${targetUser.tag}**`);
     }
   }
 
