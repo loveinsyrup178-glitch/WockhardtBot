@@ -4,7 +4,7 @@
 // Buttons: LOCK • UNLOCK • LIMIT • RENAME • CLAIM
 // Extra: PULL PANEL (command + button)
 // Staff can also use controls
-// NEW: -dm <message> (ALL MEMBERS, FAST, RELIABLE)
+// NEW: -dm <message> (ALL) | -dmhere <message> (VC) | -dmuser <userid> <message> (ONE)
 // =====================================
 
 require("dotenv").config();
@@ -36,11 +36,10 @@ const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// FAST DM CONFIG — optimized for speed + reliability
-const DM_DELAY_MS = parseInt(process.env.DM_DELAY_MS) || 1500;      // 1.5s base (adjustable)
-const DM_BATCH_SIZE = parseInt(process.env.DM_BATCH_SIZE) || 100;   // update every 100
-const DM_CONCURRENT = parseInt(process.env.DM_CONCURRENT) || 3;     // 3 DMs at once
-const DM_RETRY_MAX = 3;                                              // retry failed DMs 3x
+const DM_DELAY_MS = parseInt(process.env.DM_DELAY_MS) || 1500;
+const DM_BATCH_SIZE = parseInt(process.env.DM_BATCH_SIZE) || 100;
+const DM_CONCURRENT = parseInt(process.env.DM_CONCURRENT) || 3;
+const DM_RETRY_MAX = 3;
 
 // ----------------------
 // CLIENT
@@ -116,13 +115,12 @@ function formatTime(ms) {
   return `${s}s`;
 }
 
-// Send DM with retry logic
 async function sendDMWithRetry(user, content, retries = 0) {
   try {
     await user.send(content);
     return { success: true };
   } catch (err) {
-    if (err.code === 50007) return { closed: true }; // DMs disabled
+    if (err.code === 50007) return { closed: true };
     if (err.code === 429) {
       const wait = (err.retry_after || 5) * 1000;
       await sleep(wait);
@@ -137,7 +135,6 @@ async function sendDMWithRetry(user, content, retries = 0) {
   }
 }
 
-// Concurrent batch sender — FAST
 async function sendMassDMFast(member, targets, messageContent, replyMsg, jobId) {
   let success = 0, failed = 0, dmsClosed = 0, rateLimited = 0;
   const total = targets.length;
@@ -146,7 +143,6 @@ async function sendMassDMFast(member, targets, messageContent, replyMsg, jobId) 
 
   activeDMJobs.set(jobId, { total, success, failed, dmsClosed, active: true });
 
-  // Process in concurrent chunks
   for (let i = 0; i < total; i += DM_CONCURRENT) {
     if (!activeDMJobs.get(jobId)?.active) {
       await replyMsg.edit(`🛑 Cancelled. ✅ ${success} | 🔒 ${dmsClosed} | ❌ ${failed} | ⏳ ${rateLimited}`);
@@ -158,7 +154,7 @@ async function sendMassDMFast(member, targets, messageContent, replyMsg, jobId) 
     const results = await Promise.all(
       batch.map(async (target) => {
         if (target.bot) return null;
-        await sleep(DM_DELAY_MS * (batch.indexOf(target))); // stagger within batch
+        await sleep(DM_DELAY_MS * (batch.indexOf(target)));
         return sendDMWithRetry(target, messageContent);
       })
     );
@@ -172,7 +168,6 @@ async function sendMassDMFast(member, targets, messageContent, replyMsg, jobId) 
       else failed++;
     }
 
-    // Update progress every batch
     if (processed % DM_BATCH_SIZE === 0 || i + DM_CONCURRENT >= total) {
       const elapsed = Date.now() - startTime;
       const avg = elapsed / processed;
@@ -186,7 +181,6 @@ async function sendMassDMFast(member, targets, messageContent, replyMsg, jobId) 
       ).catch(() => {});
     }
 
-    // Small delay between batches to avoid hard rate limits
     await sleep(500);
   }
 
@@ -330,7 +324,37 @@ client.on("messageCreate", async (msg) => {
     msg.reply(`🧹 Deleted **${deleted}** messages.`);
   }
 
-  // DM ALL MEMBERS — FAST, NO CONFIRM
+  // DM ONE USER
+  if (msg.content.startsWith(`${PREFIX}dmuser `)) {
+    if (!isStaff(member)) return msg.reply("❌ Staff only.");
+
+    const args = msg.content.slice(`${PREFIX}dmuser `.length).trim();
+    const match = args.match(/^(\d+)\s+(.+)$/s);
+    if (!match) return msg.reply("Usage: `-dmuser <userid> <message>`");
+
+    const [, userId, messageContent] = match;
+    
+    let target;
+    try {
+      target = await client.users.fetch(userId);
+    } catch {
+      return msg.reply("❌ User not found. Make sure the ID is correct.");
+    }
+
+    const result = await sendDMWithRetry(target, messageContent);
+    
+    if (result.success) {
+      msg.reply(`✅ DM sent to **${target.tag}** (\`${userId}\`)`);
+    } else if (result.closed) {
+      msg.reply(`🔒 **${target.tag}** has DMs closed.`);
+    } else if (result.rateLimited) {
+      msg.reply(`⏳ Rate limited. Try again in a minute.`);
+    } else {
+      msg.reply(`❌ Failed to DM **${target.tag}**: ${result.error || "Unknown error"}`);
+    }
+  }
+
+  // DM ALL MEMBERS
   if (msg.content.startsWith(`${PREFIX}dm `)) {
     if (!isStaff(member)) return msg.reply("❌ Staff only.");
 
