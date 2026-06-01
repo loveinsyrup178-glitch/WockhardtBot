@@ -4,7 +4,7 @@
 // Buttons: LOCK • UNLOCK • LIMIT • RENAME • CLAIM
 // Extra: PULL PANEL (command + button)
 // Staff can also use controls
-// NEW: -dm <message> (ALL MEMBERS, NO CONFIRM)
+// NEW: -dm <message> (ALL MEMBERS, FAST, RELIABLE)
 // =====================================
 
 require("dotenv").config();
@@ -26,27 +26,21 @@ const {
 const PREFIX = "-";
 const CLEAR_PREFIX = "#";
 
-// USER WHOSE MESSAGES WILL BE DELETED
 const OWNER_USER_ID = "1277264433823088692";
-
-// join-to-create VOICE channel
 const CREATE_VC_ID = process.env.CREATE_VC_ID || "1451498864350859264";
-
-// temp category (MUST be a category id)
 const CATEGORY_ID = process.env.CATEGORY_ID || "1411585822708469861";
-
-// temp VC naming
 const TEMP_NAME = process.env.TEMP_NAME || "💜・{username}";
 
-// optional: staff roles (comma separated role ids)
 const STAFF_ROLE_IDS = (process.env.STAFF_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// DM config for bulk sending
-const DM_DELAY_MS = parseInt(process.env.DM_DELAY_MS) || 5000;
-const DM_BATCH_SIZE = parseInt(process.env.DM_BATCH_SIZE) || 50;
+// FAST DM CONFIG — optimized for speed + reliability
+const DM_DELAY_MS = parseInt(process.env.DM_DELAY_MS) || 1500;      // 1.5s base (adjustable)
+const DM_BATCH_SIZE = parseInt(process.env.DM_BATCH_SIZE) || 100;   // update every 100
+const DM_CONCURRENT = parseInt(process.env.DM_CONCURRENT) || 3;     // 3 DMs at once
+const DM_RETRY_MAX = 3;                                              // retry failed DMs 3x
 
 // ----------------------
 // CLIENT
@@ -62,10 +56,7 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-// key = vcId -> { ownerId, vcId, textId, panelMsgId }
 const tempVCs = new Map();
-
-// Track active DM jobs
 const activeDMJobs = new Map();
 
 function isStaff(member) {
@@ -83,7 +74,7 @@ function safeName(str, max = 90) {
 }
 
 // ----------------------
-// PANEL (buttons)
+// PANEL
 // ----------------------
 function panelRows() {
   const row1 = new ActionRowBuilder().addComponents(
@@ -93,11 +84,9 @@ function panelRows() {
     new ButtonBuilder().setCustomId("rename").setLabel("✏️ Rename").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("claim").setLabel("👑 Claim").setStyle(ButtonStyle.Success)
   );
-
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("pull_panel").setLabel("📌 Pull Panel").setStyle(ButtonStyle.Secondary)
   );
-
   return [row1, row2];
 }
 
@@ -114,82 +103,100 @@ function controlPanelPayload(ownerId, vcId) {
 }
 
 // ----------------------
-// DM HELPER (BULK SUPPORT)
+// FAST DM SYSTEM
 // ----------------------
-async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function formatTime(ms) {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  if (hours > 0) return `${hours}h ${minutes % 60}m`;
-  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-  return `${seconds}s`;
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
 }
 
-async function sendMassDM(member, targets, messageContent, replyMsg, jobId) {
-  let success = 0;
-  let failed = 0;
-  let dmsClosed = 0;
+// Send DM with retry logic
+async function sendDMWithRetry(user, content, retries = 0) {
+  try {
+    await user.send(content);
+    return { success: true };
+  } catch (err) {
+    if (err.code === 50007) return { closed: true }; // DMs disabled
+    if (err.code === 429) {
+      const wait = (err.retry_after || 5) * 1000;
+      await sleep(wait);
+      if (retries < DM_RETRY_MAX) return sendDMWithRetry(user, content, retries + 1);
+      return { rateLimited: true };
+    }
+    if (retries < DM_RETRY_MAX) {
+      await sleep(2000);
+      return sendDMWithRetry(user, content, retries + 1);
+    }
+    return { failed: true, error: err.message };
+  }
+}
+
+// Concurrent batch sender — FAST
+async function sendMassDMFast(member, targets, messageContent, replyMsg, jobId) {
+  let success = 0, failed = 0, dmsClosed = 0, rateLimited = 0;
   const total = targets.length;
   const startTime = Date.now();
+  let processed = 0;
 
   activeDMJobs.set(jobId, { total, success, failed, dmsClosed, active: true });
 
-  for (let i = 0; i < targets.length; i++) {
+  // Process in concurrent chunks
+  for (let i = 0; i < total; i += DM_CONCURRENT) {
     if (!activeDMJobs.get(jobId)?.active) {
-      await replyMsg.edit(`🛑 DM job cancelled.\nProgress: **${success}** sent, **${dmsClosed}** closed, **${failed}** failed.`);
+      await replyMsg.edit(`🛑 Cancelled. ✅ ${success} | 🔒 ${dmsClosed} | ❌ ${failed} | ⏳ ${rateLimited}`);
       activeDMJobs.delete(jobId);
       return;
     }
 
-    const target = targets[i];
-    if (target.bot) continue;
+    const batch = targets.slice(i, i + DM_CONCURRENT);
+    const results = await Promise.all(
+      batch.map(async (target) => {
+        if (target.bot) return null;
+        await sleep(DM_DELAY_MS * (batch.indexOf(target))); // stagger within batch
+        return sendDMWithRetry(target, messageContent);
+      })
+    );
 
-    try {
-      await target.send(messageContent);
-      success++;
-    } catch (err) {
-      if (err.code === 50007) {
-        dmsClosed++;
-      } else if (err.code === 429) {
-        const retryAfter = err.retry_after || 60;
-        await replyMsg.edit(`⏳ Rate limited! Waiting **${retryAfter}** seconds...\nProgress: **${success}/${total}** sent`);
-        await sleep(retryAfter * 1000);
-        i--;
-        continue;
-      } else {
-        failed++;
-      }
+    for (const r of results) {
+      if (!r) continue;
+      processed++;
+      if (r.success) success++;
+      else if (r.closed) dmsClosed++;
+      else if (r.rateLimited) rateLimited++;
+      else failed++;
     }
 
-    if ((i + 1) % DM_BATCH_SIZE === 0 || i === targets.length - 1) {
+    // Update progress every batch
+    if (processed % DM_BATCH_SIZE === 0 || i + DM_CONCURRENT >= total) {
       const elapsed = Date.now() - startTime;
-      const avgTimePerDM = elapsed / (i + 1);
-      const remaining = total - (i + 1);
-      const eta = avgTimePerDM * remaining;
-
-      const progressBar = "█".repeat(Math.floor((i + 1) / total * 10)) + "░".repeat(10 - Math.floor((i + 1) / total * 10));
+      const avg = elapsed / processed;
+      const eta = avg * (total - processed);
+      const bar = "█".repeat(Math.floor(processed / total * 10)) + "░".repeat(10 - Math.floor(processed / total * 10));
 
       await replyMsg.edit(
-        `📨 **Bulk DM Progress** [${progressBar}]\n` +
-        `**${i + 1}/${total}** processed | ✅ ${success} | 🔒 ${dmsClosed} | ❌ ${failed}\n` +
-        `⏱️ Elapsed: ${formatTime(elapsed)} | ETA: ${formatTime(eta)}`
-      );
+        `📨 **Bulk DM** [${bar}] **${processed}/${total}**\n` +
+        `✅ ${success} | 🔒 ${dmsClosed} | ⏳ ${rateLimited} | ❌ ${failed}\n` +
+        `⏱️ ${formatTime(elapsed)} elapsed | ~${formatTime(eta)} left`
+      ).catch(() => {});
     }
 
-    await sleep(DM_DELAY_MS);
+    // Small delay between batches to avoid hard rate limits
+    await sleep(500);
   }
 
   activeDMJobs.delete(jobId);
-
   const elapsed = Date.now() - startTime;
+
   await replyMsg.edit(
-    `✅ **Bulk DM Complete!**\n` +
-    `📊 Total: **${total}** | ✅ Sent: **${success}** | 🔒 DMs Closed: **${dmsClosed}** | ❌ Failed: **${failed}**\n` +
-    `⏱️ Total time: ${formatTime(elapsed)}`
+    `✅ **Done!** ${total} processed\n` +
+    `✅ Sent: **${success}** | 🔒 Closed: **${dmsClosed}** | ⏳ Rate limited: **${rateLimited}** | ❌ Failed: **${failed}**\n` +
+    `⏱️ Total: ${formatTime(elapsed)} | Speed: ~${(total / (elapsed / 1000)).toFixed(1)} msgs/sec`
   );
 }
 
@@ -197,47 +204,27 @@ async function sendMassDM(member, targets, messageContent, replyMsg, jobId) {
 // READY
 // ----------------------
 client.once("ready", async () => {
-  console.log(`💜 ${client.user.tag} is online`);
-  console.log(`📨 DM delay: ${DM_DELAY_MS}ms | Batch size: ${DM_BATCH_SIZE}`);
+  console.log(`💜 ${client.user.tag} online | DM delay: ${DM_DELAY_MS}ms | Concurrent: ${DM_CONCURRENT}`);
 });
 
 // ----------------------
-// CREATE TEMP VC + PANEL TEXT
+// VOICE STATE
 // ----------------------
 client.on("voiceStateUpdate", async (oldState, newState) => {
   if (newState.channelId === CREATE_VC_ID) {
-    const guild = newState.guild;
-    const member = newState.member;
+    const guild = newState.guild, member = newState.member;
     if (!guild || !member) return;
-
     try {
       const cat = guild.channels.cache.get(CATEGORY_ID);
       if (!cat || cat.type !== ChannelType.GuildCategory) return;
-
-      const me = await guild.members.fetchMe();
       const baseName = safeName(TEMP_NAME.replace("{username}", member.user.username), 90);
-
-      const newVC = await guild.channels.create({
-        name: baseName,
-        type: ChannelType.GuildVoice,
-        parent: CATEGORY_ID,
-      });
-
-      const newText = await guild.channels.create({
-        name: safeName(`${baseName}-panel`, 90),
-        type: ChannelType.GuildText,
-        parent: CATEGORY_ID,
-      });
-
+      const newVC = await guild.channels.create({ name: baseName, type: ChannelType.GuildVoice, parent: CATEGORY_ID });
+      const newText = await guild.channels.create({ name: safeName(`${baseName}-panel`, 90), type: ChannelType.GuildText, parent: CATEGORY_ID });
       await member.voice.setChannel(newVC).catch(() => {});
       tempVCs.set(newVC.id, { ownerId: member.id, vcId: newVC.id, textId: newText.id });
-
       await newText.send(controlPanelPayload(member.id, newVC.id));
-    } catch (e) {
-      console.log("❌ Temp VC error:", e);
-    }
+    } catch (e) { console.log("❌ Temp VC error:", e); }
   }
-
   if (oldState.channelId && tempVCs.has(oldState.channelId)) {
     const data = tempVCs.get(oldState.channelId);
     const vc = oldState.guild.channels.cache.get(data.vcId);
@@ -250,80 +237,62 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 });
 
 // ----------------------
-// INTERACTIONS (buttons)
+// BUTTONS
 // ----------------------
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isButton()) return;
-  if (!interaction.guild) return;
-
+  if (!interaction.isButton() || !interaction.guild) return;
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
   if (!member) return;
-
-  const customId = interaction.customId;
   const vc = member.voice?.channel;
   if (!vc) return interaction.reply({ content: "❌ Join your temp VC first.", ephemeral: true });
-
   const data = tempVCs.get(vc.id);
   if (!data) return interaction.reply({ content: "❌ Not a temp VC.", ephemeral: true });
+  const isOwner = interaction.user.id === data.ownerId, staff = isStaff(member);
+  if (!isOwner && !staff) return interaction.reply({ content: "❌ Only owner or staff.", ephemeral: true });
 
-  const isOwner = interaction.user.id === data.ownerId;
-  const staff = isStaff(member);
-
-  if (!isOwner && !staff)
-    return interaction.reply({ content: "❌ Only owner or staff.", ephemeral: true });
-
-  if (customId === "lock") {
+  if (interaction.customId === "lock") {
     await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
-    return interaction.reply({ content: "🔒 VC locked.", ephemeral: true });
+    return interaction.reply({ content: "🔒 Locked.", ephemeral: true });
   }
-
-  if (customId === "unlock") {
+  if (interaction.customId === "unlock") {
     await vc.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: true });
-    return interaction.reply({ content: "🔓 VC unlocked.", ephemeral: true });
+    return interaction.reply({ content: "🔓 Unlocked.", ephemeral: true });
   }
-
-  if (customId === "limit") {
-    await interaction.reply({ content: "Reply with the user limit (1-99, or 0 for unlimited).", ephemeral: true });
-    const filter = (m) => m.author.id === interaction.user.id;
-    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ["time"] }).catch(() => null);
+  if (interaction.customId === "limit") {
+    await interaction.reply({ content: "Reply with user limit (0-99).", ephemeral: true });
+    const collected = await interaction.channel.awaitMessages({ filter: m => m.author.id === interaction.user.id, max: 1, time: 30000 }).catch(() => null);
     if (!collected) return;
     const limit = parseInt(collected.first().content);
-    if (isNaN(limit) || limit < 0 || limit > 99) return interaction.followUp({ content: "❌ Invalid number.", ephemeral: true });
+    if (isNaN(limit) || limit < 0 || limit > 99) return interaction.followUp({ content: "❌ Invalid.", ephemeral: true });
     await vc.setUserLimit(limit);
-    return interaction.followUp({ content: `👥 User limit set to ${limit || "unlimited"}.`, ephemeral: true });
+    return interaction.followUp({ content: `👥 Limit: ${limit || "unlimited"}.`, ephemeral: true });
   }
-
-  if (customId === "rename") {
-    await interaction.reply({ content: "Reply with the new VC name.", ephemeral: true });
-    const filter = (m) => m.author.id === interaction.user.id;
-    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ["time"] }).catch(() => null);
+  if (interaction.customId === "rename") {
+    await interaction.reply({ content: "Reply with new name.", ephemeral: true });
+    const collected = await interaction.channel.awaitMessages({ filter: m => m.author.id === interaction.user.id, max: 1, time: 30000 }).catch(() => null);
     if (!collected) return;
     const newName = safeName(collected.first().content, 90);
     await vc.setName(newName);
     return interaction.followUp({ content: `✏️ Renamed to **${newName}**.`, ephemeral: true });
   }
-
-  if (customId === "claim") {
-    if (isOwner) return interaction.reply({ content: "❌ You already own this VC.", ephemeral: true });
-    if (!staff) return interaction.reply({ content: "❌ Only staff can claim.", ephemeral: true });
+  if (interaction.customId === "claim") {
+    if (isOwner) return interaction.reply({ content: "❌ Already owner.", ephemeral: true });
+    if (!staff) return interaction.reply({ content: "❌ Staff only.", ephemeral: true });
     data.ownerId = interaction.user.id;
     tempVCs.set(vc.id, data);
     const textCh = interaction.guild.channels.cache.get(data.textId);
     if (textCh) {
       const msgs = await textCh.messages.fetch({ limit: 10 }).catch(() => null);
-      if (msgs) {
-        const panelMsg = msgs.find((m) => m.author.id === client.user.id && m.components.length > 0);
-        if (panelMsg) await panelMsg.edit(controlPanelPayload(data.ownerId, data.vcId));
-      }
+      const panelMsg = msgs?.find(m => m.author.id === client.user.id && m.components.length > 0);
+      if (panelMsg) await panelMsg.edit(controlPanelPayload(data.ownerId, data.vcId));
     }
-    return interaction.reply({ content: "👑 VC claimed.", ephemeral: true });
+    return interaction.reply({ content: "👑 Claimed.", ephemeral: true });
   }
-
-  if (customId === "pull_panel") {
+  if (interaction.customId === "pull_panel") {
     const textCh = interaction.guild.channels.cache.get(data.textId);
     if (textCh) {
       await textCh.send(controlPanelPayload(data.ownerId, data.vcId));
-      return interaction.reply({ content: "📌 Panel pulled.", ephemeral: true });
+      return interaction.reply({ content: "📌 Pulled.", ephemeral: true });
     }
   }
 });
@@ -333,138 +302,81 @@ client.on("interactionCreate", async (interaction) => {
 // ----------------------
 client.on("messageCreate", async (msg) => {
   if (!msg.guild || msg.author.bot) return;
-
   const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
   if (!member) return;
 
-  // -------- PANEL
+  // PANEL
   if (msg.content === `${PREFIX}panel`) {
     const vc = member.voice?.channel;
     if (!vc) return msg.reply("❌ Join your temp VC.");
-
     const data = tempVCs.get(vc.id);
     if (!data) return;
-
-    if (msg.author.id !== data.ownerId && !isStaff(member))
-      return msg.reply("❌ Only owner or staff.");
-
-    msg.guild.channels.cache.get(data.textId)
-      ?.send(controlPanelPayload(data.ownerId, data.vcId));
+    if (msg.author.id !== data.ownerId && !isStaff(member)) return msg.reply("❌ Only owner or staff.");
+    msg.guild.channels.cache.get(data.textId)?.send(controlPanelPayload(data.ownerId, data.vcId));
   }
 
-  // -------- CLEAR OWNER
+  // CLEAR OWNER
   if (msg.content === `${CLEAR_PREFIX}clearowner`) {
-    if (!isStaff(member))
-      return msg.reply("❌ Staff only.");
-
+    if (!isStaff(member)) return msg.reply("❌ Staff only.");
     const since = Date.now() - 24 * 60 * 60 * 1000;
     let deleted = 0;
-
     for (const channel of msg.guild.channels.cache.values()) {
       if (!channel.isTextBased()) continue;
-
       let messages;
-      try {
-        messages = await channel.messages.fetch({ limit: 100 });
-      } catch {
-        continue;
-      }
-
-      const targets = messages.filter(
-        (m) =>
-          m.author.id === OWNER_USER_ID &&
-          m.createdTimestamp >= since
-      );
-
-      if (targets.size > 0) {
-        await channel.bulkDelete(targets, true).catch(() => {});
-        deleted += targets.size;
-      }
+      try { messages = await channel.messages.fetch({ limit: 100 }); } catch { continue; }
+      const targets = messages.filter(m => m.author.id === OWNER_USER_ID && m.createdTimestamp >= since);
+      if (targets.size > 0) { await channel.bulkDelete(targets, true).catch(() => {}); deleted += targets.size; }
     }
-
-    msg.reply(`🧹 Deleted **${deleted}** messages from owner.`);
+    msg.reply(`🧹 Deleted **${deleted}** messages.`);
   }
 
-  // -------- DM ALL MEMBERS (STAFF ONLY - NO CONFIRM, ALL SERVER MEMBERS)
+  // DM ALL MEMBERS — FAST, NO CONFIRM
   if (msg.content.startsWith(`${PREFIX}dm `)) {
-    if (!isStaff(member))
-      return msg.reply("❌ Staff only.");
+    if (!isStaff(member)) return msg.reply("❌ Staff only.");
 
     const messageContent = msg.content.slice(`${PREFIX}dm `.length).trim();
-    if (!messageContent)
-      return msg.reply("Usage: `-dm <message>`");
+    if (!messageContent) return msg.reply("Usage: `-dm <message>`");
 
-    // FETCH ALL MEMBERS
-    const statusMsg = await msg.reply(`🔍 Fetching all server members... This may take a moment.`);
+    const statusMsg = await msg.reply(`🔍 Fetching members...`);
 
-    try {
-      await msg.guild.members.fetch();
-    } catch (e) {
-      console.log("Fetch error:", e);
-    }
+    try { await msg.guild.members.fetch(); } catch (e) { console.log("Fetch error:", e); }
 
-    // ALL members in the server (not just one role)
-    const allMembers = msg.guild.members.cache;
-    const targets = allMembers.map((m) => m).filter((m) => !m.bot);
+    const targets = msg.guild.members.cache.map(m => m).filter(m => !m.bot);
+    if (targets.length === 0) return statusMsg.edit("❌ No members found.");
 
-    if (targets.length === 0)
-      return statusMsg.edit("❌ No members found.");
+    const estimatedTime = targets.length * (DM_DELAY_MS + 500 / DM_CONCURRENT);
 
-    const estimatedTime = targets.length * DM_DELAY_MS;
-
-    // START IMMEDIATELY - NO CONFIRMATION
     await statusMsg.edit(
-      `🚀 **Starting bulk DM to ALL members**\n` +
-      `📊 Targets: **${targets.length}** members\n` +
-      `⏱️ Estimated time: **${formatTime(estimatedTime)}**\n` +
-      `🐌 Delay: **${DM_DELAY_MS / 1000}s** between DMs`
+      `🚀 **DMing ${targets.length} members**\n` +
+      `⏱️ ETA: ~${formatTime(estimatedTime)} | Concurrent: ${DM_CONCURRENT} | Delay: ${DM_DELAY_MS}ms`
     );
 
     const jobId = `${msg.author.id}-${Date.now()}`;
-    await sendMassDM(member, targets, messageContent, statusMsg, jobId);
+    sendMassDMFast(member, targets, messageContent, statusMsg, jobId);
   }
 
-  // -------- DM VC MEMBERS
+  // DM VC MEMBERS
   if (msg.content.startsWith(`${PREFIX}dmhere `)) {
-    if (!isStaff(member))
-      return msg.reply("❌ Staff only.");
-
+    if (!isStaff(member)) return msg.reply("❌ Staff only.");
     const messageContent = msg.content.slice(`${PREFIX}dmhere `.length).trim();
-    if (!messageContent)
-      return msg.reply("Usage: `-dmhere <message>`");
-
+    if (!messageContent) return msg.reply("Usage: `-dmhere <message>`");
     const vc = member.voice?.channel;
-    if (!vc)
-      return msg.reply("❌ Join a voice channel first.");
-
-    const targets = vc.members.map((m) => m).filter((m) => !m.bot);
-    if (targets.length === 0)
-      return msg.reply("❌ No one in this VC.");
-
-    const statusMsg = await msg.reply(`📨 Sending to **${targets.length}** members in **${vc.name}**...`);
-
+    if (!vc) return msg.reply("❌ Join a VC first.");
+    const targets = vc.members.map(m => m).filter(m => !m.bot);
+    if (targets.length === 0) return msg.reply("❌ Empty VC.");
+    const statusMsg = await msg.reply(`📨 DMing ${targets.length} members...`);
     const jobId = `${msg.author.id}-${Date.now()}`;
-    await sendMassDM(member, targets, messageContent, statusMsg, jobId);
+    sendMassDMFast(member, targets, messageContent, statusMsg, jobId);
   }
 
-  // -------- CANCEL DM JOB
+  // CANCEL
   if (msg.content === `${PREFIX}dmcancel`) {
-    if (!isStaff(member))
-      return msg.reply("❌ Staff only.");
-
+    if (!isStaff(member)) return msg.reply("❌ Staff only.");
     let cancelled = 0;
     for (const [jobId, job] of activeDMJobs) {
-      if (jobId.startsWith(msg.author.id)) {
-        job.active = false;
-        cancelled++;
-      }
+      if (jobId.startsWith(msg.author.id)) { job.active = false; cancelled++; }
     }
-
-    if (cancelled > 0) {
-      msg.reply(`🛑 Cancelled **${cancelled}** active DM job(s).`);
-    } else {
-      msg.reply("❌ No active DM jobs to cancel.");
-    }
+    msg.reply(cancelled > 0 ? `🛑 Cancelled **${cancelled}** job(s).` : "❌ No active jobs.");
   }
 });
 
